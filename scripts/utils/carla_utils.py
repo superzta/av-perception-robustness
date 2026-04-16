@@ -161,6 +161,41 @@ def attach_rgb_camera(world, vehicle: carla.Actor, camera_cfg: dict, logger=None
     return camera
 
 
+def attach_lidar(world, vehicle: carla.Actor, lidar_cfg: dict, logger=None) -> carla.Actor:
+    lidar_bp = world.get_blueprint_library().find("sensor.lidar.ray_cast")
+    lidar_bp.set_attribute("channels", str(lidar_cfg.get("channels", 32)))
+    lidar_bp.set_attribute("range", str(lidar_cfg.get("range", 50.0)))
+    lidar_bp.set_attribute("points_per_second", str(lidar_cfg.get("points_per_second", 56000)))
+    lidar_bp.set_attribute("rotation_frequency", str(lidar_cfg.get("rotation_frequency", 20.0)))
+    lidar_bp.set_attribute("upper_fov", str(lidar_cfg.get("upper_fov", 10.0)))
+    lidar_bp.set_attribute("lower_fov", str(lidar_cfg.get("lower_fov", -30.0)))
+    lidar_bp.set_attribute("sensor_tick", str(lidar_cfg.get("sensor_tick", 0.0)))
+
+    transform_cfg = lidar_cfg.get("transform", {})
+    lidar_transform = carla.Transform(
+        carla.Location(
+            x=float(transform_cfg.get("x", 1.5)),
+            y=float(transform_cfg.get("y", 0.0)),
+            z=float(transform_cfg.get("z", 2.2)),
+        ),
+        carla.Rotation(
+            pitch=float(transform_cfg.get("pitch", 0.0)),
+            yaw=float(transform_cfg.get("yaw", 0.0)),
+            roll=float(transform_cfg.get("roll", 0.0)),
+        ),
+    )
+    lidar = world.spawn_actor(lidar_bp, lidar_transform, attach_to=vehicle)
+    if logger is not None:
+        logger.info("Attached LiDAR id=%s to ego id=%s", lidar.id, vehicle.id)
+    return lidar
+
+
+def lidar_measurement_to_array(lidar_measurement) -> np.ndarray:
+    points = np.frombuffer(lidar_measurement.raw_data, dtype=np.float32)
+    points = points.reshape((-1, 4))
+    return points.copy()
+
+
 def image_to_bgr_array(image) -> np.ndarray:
     bgra = np.frombuffer(image.raw_data, dtype=np.uint8)
     bgra = bgra.reshape((image.height, image.width, 4))

@@ -25,6 +25,8 @@ Camera-only vs sensor-fusion perception robustness experiments in CARLA under ad
 6. Run Stage 2 post-processing:
    - `pip install matplotlib` (optional, only needed for plots)
    - `python scripts\postprocess_stage2.py`
+7. Run Stage 3 camera+LiDAR fusion baseline:
+   - `python scripts\run_fusion_baseline.py --config configs\stage3_fusion_daylight.json`
 
 Outputs are written to:
 - `outputs\logs`
@@ -39,6 +41,13 @@ For Stage 2, frame outputs are organized as:
 - `outputs\tables\<run_id>_counts_by_class.csv`
 - `outputs\tables\<run_id>_counts_by_frame.csv`
 - `outputs\plots\<run_id>_class_counts.png`
+
+For Stage 3, synchronized fusion outputs are organized as:
+- `outputs\fusion_baseline\<run_id>\rgb_raw\frame_<id>.png`
+- `outputs\fusion_baseline\<run_id>\lidar_points\frame_<id>.npy`
+- `outputs\fusion_baseline\<run_id>\fusion_annotated\frame_<id>.png`
+- `outputs\fusion_baseline\<run_id>\logs\<run_id>_fusion_detections.csv`
+- `outputs\fusion_baseline\<run_id>\logs\<run_id>_fusion_detections.jsonl`
 
 YOLO weight path is set to:
 - `models\weights\yolo\yolov8n.pt`
@@ -67,9 +76,9 @@ The runner reads one JSON file with:
 - Run `python scripts\postprocess_stage2.py` to generate summary tables and a quick class-count plot.
 
 ### 3) Multimodal data capture and basic fusion
-- Enable lidar in config and add your fusion model code under `scripts/`.
-- Capture synchronized camera + LiDAR data.
-- Compare camera-only vs fusion on identical seeds/scenarios.
+- Use `python scripts\run_fusion_baseline.py --config configs\stage3_fusion_daylight.json`.
+- This baseline uses practical late fusion (YOLO + LiDAR confirmation in each RGB box) for stable Windows execution.
+- For direct comparison, keep the same map/weather/simulation/traffic/seed values between `stage2` and `stage3` configs.
 
 ### 4) Scenario engine and robustness
 - Add scripted weather/time/occlusion variations.
