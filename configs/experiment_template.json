@@ -1,0 +1,61 @@
+{
+  "experiment_name": "stage1_baseline_camera_only",
+  "carla": {
+    "host": "127.0.0.1",
+    "port": 2000,
+    "timeout_seconds": 10.0,
+    "map": "Town03"
+  },
+  "weather": {
+    "preset": "ClearNoon",
+    "cloudiness": 10.0,
+    "precipitation": 0.0,
+    "fog_density": 0.0,
+    "sun_altitude_angle": 70.0
+  },
+  "sensors": {
+    "camera": {
+      "enabled": true,
+      "image_width": 1280,
+      "image_height": 720,
+      "fov": 90,
+      "transform": {
+        "x": 1.5,
+        "y": 0.0,
+        "z": 2.4,
+        "pitch": -10.0,
+        "yaw": 0.0,
+        "roll": 0.0
+      }
+    },
+    "lidar": {
+      "enabled": false,
+      "channels": 32,
+      "range": 50.0,
+      "points_per_second": 56000
+    }
+  },
+  "traffic": {
+    "vehicle_count": 20,
+    "behavior_profile": "normal"
+  },
+  "pedestrians": {
+    "walker_count": 10,
+    "cross_factor": 0.2
+  },
+  "attacks": {
+    "enabled": false,
+    "camera_patch": {
+      "enabled": false,
+      "target": "stop_sign"
+    },
+    "lidar_spoofing": {
+      "enabled": false,
+      "mode": "phantom_object"
+    },
+    "camera_blinding": {
+      "enabled": false,
+      "intensity": 0.0
+    }
+  }
+}
