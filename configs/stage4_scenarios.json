@@ -1,0 +1,165 @@
+{
+  "report_name": "stage4_robustness_scenarios",
+  "pipeline_retry_count": 1,
+  "base_camera_config": "configs/stage2_camera_daylight.json",
+  "base_fusion_config": "configs/stage3_fusion_daylight.json",
+  "global_overrides": {
+    "simulation": {
+      "total_frames": 140,
+      "warmup_frames": 20,
+      "save_every_n": 1
+    },
+    "scenario": {
+      "stability_jaccard_threshold": 0.3
+    }
+  },
+  "scenarios": [
+    {
+      "name": "clear_daylight_front",
+      "weather": {
+        "preset": "ClearNoon"
+      },
+      "camera_transform": {
+        "x": 1.5,
+        "y": 0.0,
+        "z": 2.4,
+        "pitch": -10.0,
+        "yaw": 0.0,
+        "roll": 0.0
+      },
+      "traffic": {
+        "vehicle_count": 30
+      },
+      "pedestrians": {
+        "walker_count": 0
+      }
+    },
+    {
+      "name": "dusk_night_front",
+      "weather": {
+        "cloudiness": 40.0,
+        "precipitation": 0.0,
+        "fog_density": 0.0,
+        "sun_altitude_angle": -8.0
+      },
+      "camera_transform": {
+        "x": 1.5,
+        "y": 0.0,
+        "z": 2.4,
+        "pitch": -10.0,
+        "yaw": 0.0,
+        "roll": 0.0
+      },
+      "traffic": {
+        "vehicle_count": 30
+      },
+      "pedestrians": {
+        "walker_count": 0
+      }
+    },
+    {
+      "name": "fog_front",
+      "weather": {
+        "cloudiness": 70.0,
+        "precipitation": 0.0,
+        "fog_density": 65.0,
+        "sun_altitude_angle": 20.0
+      },
+      "camera_transform": {
+        "x": 1.5,
+        "y": 0.0,
+        "z": 2.4,
+        "pitch": -10.0,
+        "yaw": 0.0,
+        "roll": 0.0
+      },
+      "traffic": {
+        "vehicle_count": 30
+      },
+      "pedestrians": {
+        "walker_count": 0
+      }
+    },
+    {
+      "name": "rain_front",
+      "weather": {
+        "preset": "HardRainNoon"
+      },
+      "camera_transform": {
+        "x": 1.5,
+        "y": 0.0,
+        "z": 2.4,
+        "pitch": -10.0,
+        "yaw": 0.0,
+        "roll": 0.0
+      },
+      "traffic": {
+        "vehicle_count": 30
+      },
+      "pedestrians": {
+        "walker_count": 0
+      }
+    },
+    {
+      "name": "viewpoint_side",
+      "weather": {
+        "preset": "ClearNoon"
+      },
+      "camera_transform": {
+        "x": 0.0,
+        "y": 0.7,
+        "z": 2.2,
+        "pitch": -5.0,
+        "yaw": 90.0,
+        "roll": 0.0
+      },
+      "traffic": {
+        "vehicle_count": 30
+      },
+      "pedestrians": {
+        "walker_count": 0
+      }
+    },
+    {
+      "name": "viewpoint_rear",
+      "weather": {
+        "preset": "ClearNoon"
+      },
+      "camera_transform": {
+        "x": -1.8,
+        "y": 0.0,
+        "z": 2.1,
+        "pitch": -4.0,
+        "yaw": 180.0,
+        "roll": 0.0
+      },
+      "traffic": {
+        "vehicle_count": 30
+      },
+      "pedestrians": {
+        "walker_count": 0
+      }
+    },
+    {
+      "name": "viewpoint_partial_occlusion",
+      "weather": {
+        "preset": "ClearNoon"
+      },
+      "camera_transform": {
+        "x": 0.8,
+        "y": 0.45,
+        "z": 1.6,
+        "pitch": -2.0,
+        "yaw": 20.0,
+        "roll": 0.0
+      },
+      "traffic": {
+        "vehicle_count": 45
+      },
+      "pedestrians": {
+        "walker_count": 0
+      },
+      "notes": "Partial occlusion is approximated by side-offset lower camera plus denser traffic."
+    }
+  ]
+}

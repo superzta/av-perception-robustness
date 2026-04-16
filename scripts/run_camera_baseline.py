@@ -93,6 +93,15 @@ def write_detection_rows(csv_writer, jsonl_fp, run_id: str, frame_info: dict, de
     return rows_written
 
 
+def jaccard_similarity(a: set, b: set) -> float:
+    if not a and not b:
+        return 1.0
+    union = a.union(b)
+    if not union:
+        return 1.0
+    return len(a.intersection(b)) / len(union)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stage 2: camera-only CARLA + YOLO baseline.")
     parser.add_argument(
@@ -100,6 +109,12 @@ def main() -> int:
         type=str,
         default="configs/stage2_camera_daylight.json",
         help="Path to baseline JSON config.",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default="",
+        help="Optional fixed run id for reproducible scenario sweeps.",
     )
     args = parser.parse_args()
 
@@ -109,7 +124,7 @@ def main() -> int:
         return 1
     config = load_config(config_path)
 
-    run_id = make_run_id(config.get("experiment_name", "camera_baseline"))
+    run_id = args.run_id.strip() or make_run_id(config.get("experiment_name", "camera_baseline"))
     output_dirs = ensure_directories(
         {
             "logs": "outputs/logs",
@@ -139,6 +154,10 @@ def main() -> int:
         "config_path": str(config_path),
         "raw_frames_dir": str(raw_dir),
         "annotated_frames_dir": str(annotated_dir),
+        "scenario_name": config.get("scenario", {}).get("name", "default"),
+        "weather_conditions": config.get("weather", {}),
+        "vehicle_count": int(config.get("traffic", {}).get("vehicle_count", 0)),
+        "pedestrian_count": int(config.get("pedestrians", {}).get("walker_count", 0)),
     }
 
     actors = []
@@ -193,6 +212,7 @@ def main() -> int:
 
         csv_path = output_dirs["logs"] / f"{run_id}_detections.csv"
         jsonl_path = output_dirs["logs"] / f"{run_id}_detections.jsonl"
+        frame_metrics_path = output_dirs["logs"] / f"{run_id}_frame_metrics.csv"
         csv_fp = csv_path.open("w", newline="", encoding="utf-8")
         csv_writer = csv.DictWriter(
             csv_fp,
@@ -211,12 +231,35 @@ def main() -> int:
         )
         csv_writer.writeheader()
         jsonl_fp = jsonl_path.open("w", encoding="utf-8")
+        frame_metrics_fp = frame_metrics_path.open("w", newline="", encoding="utf-8")
+        frame_metrics_writer = csv.DictWriter(
+            frame_metrics_fp,
+            fieldnames=[
+                "run_id",
+                "scenario_name",
+                "timestamp",
+                "frame_id",
+                "detection_count",
+                "unique_classes",
+                "missed_detection_flag",
+                "unstable_classification_flag",
+                "raw_image_path",
+                "annotated_image_path",
+            ],
+        )
+        frame_metrics_writer.writeheader()
 
         total_frames = int(sim_cfg.get("total_frames", 120))
         warmup_frames = int(sim_cfg.get("warmup_frames", 10))
         save_every_n = max(1, int(sim_cfg.get("save_every_n", 1)))
         rows_logged = 0
         frames_processed = 0
+        missed_frames = 0
+        unstable_frames = 0
+        previous_classes = set()
+        previous_detection_count = 0
+        scenario_name = config.get("scenario", {}).get("name", "default")
+        stability_jaccard_threshold = float(config.get("scenario", {}).get("stability_jaccard_threshold", 0.3))
 
         logger.info(
             "Capturing frames: total=%d, warmup=%d, save_every_n=%d",
@@ -252,10 +295,36 @@ def main() -> int:
             rows_logged += write_detection_rows(csv_writer, jsonl_fp, run_id, frame_info, detections)
             frames_processed += 1
 
+            current_classes = {det["class_name"] for det in detections}
+            missed_flag = int(previous_detection_count > 0 and len(detections) == 0)
+            unstable_flag = int(
+                bool(previous_classes)
+                and bool(current_classes)
+                and jaccard_similarity(previous_classes, current_classes) < stability_jaccard_threshold
+            )
+            missed_frames += missed_flag
+            unstable_frames += unstable_flag
+            frame_metrics_writer.writerow(
+                {
+                    "run_id": run_id,
+                    "scenario_name": scenario_name,
+                    "timestamp": round(sim_time, 6),
+                    "frame_id": frame_id,
+                    "detection_count": len(detections),
+                    "unique_classes": "|".join(sorted(current_classes)) if current_classes else "__none__",
+                    "missed_detection_flag": missed_flag,
+                    "unstable_classification_flag": unstable_flag,
+                    "raw_image_path": str(raw_path),
+                    "annotated_image_path": str(ann_path),
+                }
+            )
+            previous_classes = current_classes
+            previous_detection_count = len(detections)
+
             if frames_processed % 20 == 0:
                 logger.info("Processed frames=%d, detection_rows=%d", frames_processed, rows_logged)
 
-        camera.stop()
+        frame_metrics_fp.close()
         metrics.update(
             {
                 "status": "completed",
@@ -263,6 +332,9 @@ def main() -> int:
                 "detection_rows": rows_logged,
                 "detections_csv": str(csv_path),
                 "detections_jsonl": str(jsonl_path),
+                "frame_metrics_csv": str(frame_metrics_path),
+                "missed_detection_frames": missed_frames,
+                "unstable_classification_frames": unstable_frames,
             }
         )
     except Exception as exc:  # noqa: BLE001
@@ -277,12 +349,14 @@ def main() -> int:
             jsonl_fp.close()
         if csv_fp is not None:
             csv_fp.close()
+        if "frame_metrics_fp" in locals() and frame_metrics_fp is not None and not frame_metrics_fp.closed:
+            frame_metrics_fp.close()
 
+        if world is not None and original_settings is not None:
+            world.apply_settings(original_settings)
         cleanup_actors(actors, logger)
         if client is not None and npc_vehicle_ids:
             cleanup_actor_ids(client, npc_vehicle_ids, logger)
-        if world is not None and original_settings is not None:
-            world.apply_settings(original_settings)
 
         metrics["duration_seconds"] = round(time.time() - start_time, 3)
         metrics_path = output_dirs["metrics"] / f"{run_id}_stage2_camera_baseline.json"

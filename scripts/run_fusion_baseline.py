@@ -121,6 +121,12 @@ def main() -> int:
         default="configs/stage3_fusion_daylight.json",
         help="Path to Stage 3 fusion config JSON.",
     )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default="",
+        help="Optional fixed run id for reproducible scenario sweeps.",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config).resolve()
@@ -129,7 +135,7 @@ def main() -> int:
         return 1
     config = load_config(config_path)
 
-    run_id = make_run_id(config.get("experiment_name", "fusion_baseline"))
+    run_id = args.run_id.strip() or make_run_id(config.get("experiment_name", "fusion_baseline"))
     output_dirs = ensure_directories(
         {
             "root": "outputs/fusion_baseline",
@@ -160,6 +166,10 @@ def main() -> int:
         "fusion_mode": "late_fusion_rgb_with_lidar_confirmation",
         "config_path": str(config_path),
         "output_root": str(run_root),
+        "scenario_name": config.get("scenario", {}).get("name", "default"),
+        "weather_conditions": config.get("weather", {}),
+        "vehicle_count": int(config.get("traffic", {}).get("vehicle_count", 0)),
+        "pedestrian_count": int(config.get("pedestrians", {}).get("walker_count", 0)),
     }
 
     actors = []
@@ -224,6 +234,7 @@ def main() -> int:
 
         csv_path = logs_dir / f"{run_id}_fusion_detections.csv"
         jsonl_path = logs_dir / f"{run_id}_fusion_detections.jsonl"
+        frame_metrics_path = logs_dir / f"{run_id}_frame_metrics.csv"
         csv_fp = csv_path.open("w", newline="", encoding="utf-8")
         csv_writer = csv.DictWriter(
             csv_fp,
@@ -249,6 +260,26 @@ def main() -> int:
         )
         csv_writer.writeheader()
         jsonl_fp = jsonl_path.open("w", encoding="utf-8")
+        frame_metrics_fp = frame_metrics_path.open("w", newline="", encoding="utf-8")
+        frame_metrics_writer = csv.DictWriter(
+            frame_metrics_fp,
+            fieldnames=[
+                "run_id",
+                "scenario_name",
+                "timestamp",
+                "frame_id",
+                "yolo_detection_count",
+                "fused_detection_count",
+                "lidar_confirmed_count",
+                "lidar_unconfirmed_count",
+                "unique_classes",
+                "missed_detection_flag",
+                "unstable_classification_flag",
+                "rgb_path",
+                "fusion_annotated_path",
+            ],
+        )
+        frame_metrics_writer.writeheader()
 
         total_frames = int(sim_cfg.get("total_frames", 200))
         warmup_frames = int(sim_cfg.get("warmup_frames", 20))
@@ -258,6 +289,12 @@ def main() -> int:
         rows_logged = 0
         total_confirmed = 0
         total_unconfirmed = 0
+        missed_frames = 0
+        unstable_frames = 0
+        previous_classes = set()
+        previous_detection_count = 0
+        scenario_name = config.get("scenario", {}).get("name", "default")
+        stability_jaccard_threshold = float(config.get("scenario", {}).get("stability_jaccard_threshold", 0.3))
 
         fusion_cfg = config.get("fusion", {})
         logger.info(
@@ -322,6 +359,36 @@ def main() -> int:
             rows_logged += write_fusion_rows(csv_writer, jsonl_fp, run_id, frame_info, fused_detections)
             frames_processed += 1
 
+            current_classes = {det["class_name"] for det in fused_detections}
+            missed_flag = int(previous_detection_count > 0 and len(fused_detections) == 0)
+            if not previous_classes and not current_classes:
+                class_jaccard = 1.0
+            else:
+                union = previous_classes.union(current_classes)
+                class_jaccard = (len(previous_classes.intersection(current_classes)) / len(union)) if union else 1.0
+            unstable_flag = int(bool(previous_classes) and bool(current_classes) and class_jaccard < stability_jaccard_threshold)
+            missed_frames += missed_flag
+            unstable_frames += unstable_flag
+            frame_metrics_writer.writerow(
+                {
+                    "run_id": run_id,
+                    "scenario_name": scenario_name,
+                    "timestamp": round(sim_time, 6),
+                    "frame_id": frame_id,
+                    "yolo_detection_count": len(detections),
+                    "fused_detection_count": len(fused_detections),
+                    "lidar_confirmed_count": confirmed,
+                    "lidar_unconfirmed_count": unconfirmed,
+                    "unique_classes": "|".join(sorted(current_classes)) if current_classes else "__none__",
+                    "missed_detection_flag": missed_flag,
+                    "unstable_classification_flag": unstable_flag,
+                    "rgb_path": str(rgb_path),
+                    "fusion_annotated_path": str(ann_path),
+                }
+            )
+            previous_classes = current_classes
+            previous_detection_count = len(fused_detections)
+
             if frames_processed % 20 == 0:
                 logger.info(
                     "Processed=%d rows=%d confirmed=%d unconfirmed=%d",
@@ -340,6 +407,9 @@ def main() -> int:
                 "total_unconfirmed_detections": total_unconfirmed,
                 "fusion_csv": str(csv_path),
                 "fusion_jsonl": str(jsonl_path),
+                "frame_metrics_csv": str(frame_metrics_path),
+                "missed_detection_frames": missed_frames,
+                "unstable_classification_frames": unstable_frames,
             }
         )
     except Exception as exc:  # noqa: BLE001
@@ -354,6 +424,8 @@ def main() -> int:
             jsonl_fp.close()
         if csv_fp is not None:
             csv_fp.close()
+        if "frame_metrics_fp" in locals() and frame_metrics_fp is not None and not frame_metrics_fp.closed:
+            frame_metrics_fp.close()
 
         if world is not None and original_settings is not None:
             world.apply_settings(original_settings)

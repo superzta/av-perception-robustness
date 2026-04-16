@@ -27,6 +27,8 @@ Camera-only vs sensor-fusion perception robustness experiments in CARLA under ad
    - `python scripts\postprocess_stage2.py`
 7. Run Stage 3 camera+LiDAR fusion baseline:
    - `python scripts\run_fusion_baseline.py --config configs\stage3_fusion_daylight.json`
+8. Run Stage 4 controlled robustness sweep (camera-only + fusion):
+   - `python scripts\run_stage4_scenarios.py --scenario-config configs\stage4_scenarios.json`
 
 Outputs are written to:
 - `outputs\logs`
@@ -48,6 +50,12 @@ For Stage 3, synchronized fusion outputs are organized as:
 - `outputs\fusion_baseline\<run_id>\fusion_annotated\frame_<id>.png`
 - `outputs\fusion_baseline\<run_id>\logs\<run_id>_fusion_detections.csv`
 - `outputs\fusion_baseline\<run_id>\logs\<run_id>_fusion_detections.jsonl`
+
+For Stage 4, report-ready comparison outputs are organized as:
+- `outputs\stage4_report\summary.csv`
+- `outputs\stage4_report\representative_screenshots\<scenario>_camera.png`
+- `outputs\stage4_report\representative_screenshots\<scenario>_fusion.png`
+- `outputs\stage4_report\generated_configs\`
 
 YOLO weight path is set to:
 - `models\weights\yolo\yolov8n.pt`
@@ -81,9 +89,10 @@ The runner reads one JSON file with:
 - For direct comparison, keep the same map/weather/simulation/traffic/seed values between `stage2` and `stage3` configs.
 
 ### 4) Scenario engine and robustness
-- Add scripted weather/time/occlusion variations.
-- Sweep traffic and pedestrian levels via config files.
-- Store per-scenario metrics and aggregate summaries.
+- Run `python scripts\run_stage4_scenarios.py --scenario-config configs\stage4_scenarios.json`.
+- Scenarios include clear daylight, dusk/night, fog, rain, side view, rear view, and a partial-occlusion approximation.
+- The script runs both pipelines using matched scenario overrides (same spawn logic, traffic, weather, and camera viewpoint per scenario).
+- It records frame-level failure flags (`missed_detection_flag`, `unstable_classification_flag`) and writes an aggregated side-by-side summary CSV.
 
 ### 5) Adversarial attack implementation
 - Enable and parameterize attack settings in `attacks`.

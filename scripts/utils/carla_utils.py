@@ -47,12 +47,13 @@ def connect_to_carla(carla_cfg: dict, logger):
 
 
 def apply_weather(world, weather_cfg: dict, logger) -> None:
-    preset = weather_cfg.get("preset", "ClearNoon")
-    weather = getattr(carla.WeatherParameters, preset, None)
-    if weather is not None:
-        world.set_weather(weather)
-        logger.info("Applied weather preset: %s", preset)
-        return
+    preset = weather_cfg.get("preset")
+    if preset:
+        weather = getattr(carla.WeatherParameters, preset, None)
+        if weather is not None:
+            world.set_weather(weather)
+            logger.info("Applied weather preset: %s", preset)
+            return
 
     current = world.get_weather()
     current.cloudiness = float(weather_cfg.get("cloudiness", current.cloudiness))
