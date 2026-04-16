@@ -34,6 +34,15 @@ Camera-only vs sensor-fusion perception robustness experiments in CARLA under ad
    - LiDAR spoofing example: `python scripts\run_attack_evaluation.py --pipeline fusion --config configs\stage5_lidar_spoof_attack.json`
 10. Run Stage 6 evaluation + report asset generation:
    - `python scripts\generate_stage6_assets.py`
+11. Run full automated episode-based workflow (recommended final command):
+   - `python scripts\run_full_pipeline.py`
+   - Optional quick smoke test: `python scripts\run_full_pipeline.py --episodes-per-condition 1 --max-conditions 2`
+   - Resume after crash/interruption without restarting completed episodes: `python scripts\run_full_pipeline.py --resume-from-progress`
+   - The script now performs simulator preflight and will fail fast if CARLA is not reachable.
+   - You can skip unstable maps: `python scripts\run_full_pipeline.py --skip-towns Town04`
+   - You can run map-switch diagnostics only: `python scripts\run_full_pipeline.py --town-switch-test`
+   - The pipeline now adds a short stabilization phase after town changes to reduce simulator freeze risk.
+   - The pipeline can auto-skip unhealthy towns after a real streaming/sensor health check (`auto_skip_unhealthy_towns` in config).
 
 Outputs are written to:
 - `outputs\logs`
@@ -82,6 +91,14 @@ For Stage 6 evaluation/report assets are organized as:
 - `outputs\plots\stage6_precision_recall_by_condition.png`
 - `outputs\plots\stage6_attack_decision_change_rate.png`
 - `outputs\plots\stage6_representative_screenshots\`
+
+For the automated episode-based workflow, outputs are organized as:
+- `outputs\episode_logs\`
+- `outputs\summary_tables\`
+- `outputs\plots\`
+- `outputs\representative_screenshots\`
+- `outputs\final_report_assets\`
+- `outputs\final_presentation_assets\`
 
 YOLO weight path is set to:
 - `models\weights\yolo\yolov8n.pt`

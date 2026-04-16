@@ -16,3 +16,9 @@ build/
 dist/
 
 outputs_test_original/
+
+outputs_copy/
+
+.DS_Store
+
+outputs.zip

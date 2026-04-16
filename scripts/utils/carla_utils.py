@@ -31,7 +31,13 @@ def connect_to_carla(carla_cfg: dict, logger):
     client.set_timeout(timeout)
     world = client.get_world()
 
-    if target_map and world.get_map().name != target_map:
+    current_map_name = world.get_map().name if world is not None else ""
+    current_map_slug = str(current_map_name).replace("\\", "/").split("/")[-1]
+    target_map_slug = str(target_map).replace("\\", "/").split("/")[-1]
+
+    # CARLA often reports names like "Carla/Maps/Town03" while configs use "Town03".
+    # Normalize both before deciding whether map reload is necessary.
+    if target_map and current_map_slug.lower() != target_map_slug.lower():
         logger.info("Loading map %s", target_map)
         world = client.load_world(target_map)
         # Newly loaded maps can take a few seconds before APIs are responsive.
@@ -41,6 +47,8 @@ def connect_to_carla(carla_cfg: dict, logger):
                 break
             except RuntimeError:
                 time.sleep(1.0)
+    else:
+        logger.info("Map already loaded: %s", current_map_name)
 
     logger.info("Connected to CARLA at %s:%d", host, port)
     return client, world
