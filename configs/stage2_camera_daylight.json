@@ -1,0 +1,63 @@
+{
+  "experiment_name": "stage2_camera_only_daylight",
+  "seed": 42,
+  "carla": {
+    "host": "127.0.0.1",
+    "port": 2000,
+    "timeout_seconds": 20.0,
+    "map": "Town03",
+    "traffic_manager_port": 8000
+  },
+  "weather": {
+    "preset": "ClearNoon"
+  },
+  "simulation": {
+    "fixed_delta_seconds": 0.05,
+    "warmup_frames": 20,
+    "total_frames": 200,
+    "save_every_n": 1
+  },
+  "ego_vehicle": {
+    "blueprint_filter": "vehicle.tesla.model3",
+    "spawn_point_index": 0,
+    "autopilot_enabled": true
+  },
+  "sensors": {
+    "camera": {
+      "image_width": 1280,
+      "image_height": 720,
+      "fov": 90,
+      "sensor_tick": 0.0,
+      "transform": {
+        "x": 1.5,
+        "y": 0.0,
+        "z": 2.4,
+        "pitch": -10.0,
+        "yaw": 0.0,
+        "roll": 0.0
+      }
+    }
+  },
+  "traffic": {
+    "vehicle_count": 30
+  },
+  "pedestrians": {
+    "walker_count": 0
+  },
+  "detector": {
+    "backend": "ultralytics",
+    "model": "models/weights/yolo/yolov8n.pt",
+    "confidence_threshold": 0.25,
+    "require_yolo": true,
+    "target_classes": [
+      "car",
+      "truck",
+      "bus",
+      "motorcycle",
+      "bicycle",
+      "person",
+      "traffic light",
+      "stop sign"
+    ]
+  }
+}

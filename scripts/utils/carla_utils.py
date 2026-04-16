@@ -3,8 +3,9 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
+import numpy as np
 try:
     import carla
 except ModuleNotFoundError as exc:
@@ -102,6 +103,136 @@ def spawn_camera_on_vehicle(world, camera_cfg: dict, logger) -> Tuple[carla.Acto
     return vehicle, camera
 
 
+def spawn_ego_vehicle(
+    world,
+    vehicle_filter: str = "vehicle.tesla.model3",
+    spawn_point_index: int = 0,
+    logger=None,
+) -> carla.Actor:
+    blueprints = world.get_blueprint_library().filter(vehicle_filter)
+    if not blueprints:
+        blueprints = world.get_blueprint_library().filter("vehicle.*")
+    if not blueprints:
+        raise RuntimeError("No vehicle blueprints available for ego spawn.")
+
+    spawn_points = world.get_map().get_spawn_points()
+    if not spawn_points:
+        raise RuntimeError("No spawn points available in current CARLA map.")
+
+    index = int(spawn_point_index) % len(spawn_points)
+    vehicle_bp = random.choice(blueprints)
+    ego_vehicle = world.try_spawn_actor(vehicle_bp, spawn_points[index])
+    if ego_vehicle is None:
+        raise RuntimeError(f"Failed to spawn ego vehicle at spawn index {index}.")
+
+    if logger is not None:
+        logger.info(
+            "Spawned ego vehicle id=%s blueprint=%s at spawn_index=%s",
+            ego_vehicle.id,
+            vehicle_bp.id,
+            index,
+        )
+    return ego_vehicle
+
+
+def attach_rgb_camera(world, vehicle: carla.Actor, camera_cfg: dict, logger=None) -> carla.Actor:
+    camera_bp = world.get_blueprint_library().find("sensor.camera.rgb")
+    camera_bp.set_attribute("image_size_x", str(camera_cfg.get("image_width", 1280)))
+    camera_bp.set_attribute("image_size_y", str(camera_cfg.get("image_height", 720)))
+    camera_bp.set_attribute("fov", str(camera_cfg.get("fov", 90)))
+    camera_bp.set_attribute("sensor_tick", str(camera_cfg.get("sensor_tick", 0.0)))
+
+    transform_cfg = camera_cfg.get("transform", {})
+    camera_transform = carla.Transform(
+        carla.Location(
+            x=float(transform_cfg.get("x", 1.5)),
+            y=float(transform_cfg.get("y", 0.0)),
+            z=float(transform_cfg.get("z", 2.4)),
+        ),
+        carla.Rotation(
+            pitch=float(transform_cfg.get("pitch", -10.0)),
+            yaw=float(transform_cfg.get("yaw", 0.0)),
+            roll=float(transform_cfg.get("roll", 0.0)),
+        ),
+    )
+    camera = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
+    if logger is not None:
+        logger.info("Attached RGB camera id=%s to ego id=%s", camera.id, vehicle.id)
+    return camera
+
+
+def image_to_bgr_array(image) -> np.ndarray:
+    bgra = np.frombuffer(image.raw_data, dtype=np.uint8)
+    bgra = bgra.reshape((image.height, image.width, 4))
+    bgr = bgra[:, :, :3]
+    return bgr.copy()
+
+
+def get_synced_camera_image(world, image_queue: queue.Queue, timeout_seconds: float = 2.0):
+    snapshot = world.tick()
+    while True:
+        image = image_queue.get(timeout=timeout_seconds)
+        if image.frame >= snapshot:
+            return image
+
+
+def set_world_synchronous(
+    world,
+    enabled: bool,
+    fixed_delta_seconds: Optional[float] = None,
+):
+    settings = world.get_settings()
+    settings.synchronous_mode = enabled
+    if fixed_delta_seconds is not None:
+        settings.fixed_delta_seconds = fixed_delta_seconds
+    world.apply_settings(settings)
+
+
+def spawn_npc_vehicles(
+    client,
+    world,
+    vehicle_count: int,
+    traffic_manager_port: int,
+    seed: int,
+    logger=None,
+):
+    if vehicle_count <= 0:
+        return []
+
+    traffic_manager = client.get_trafficmanager(traffic_manager_port)
+    traffic_manager.set_synchronous_mode(True)
+    traffic_manager.set_random_device_seed(seed)
+
+    spawn_points = world.get_map().get_spawn_points()
+    random.Random(seed).shuffle(spawn_points)
+
+    blueprints = world.get_blueprint_library().filter("vehicle.*")
+    commands = []
+    for transform in spawn_points[:vehicle_count]:
+        bp = random.choice(blueprints)
+        if bp.has_attribute("color"):
+            color = random.choice(bp.get_attribute("color").recommended_values)
+            bp.set_attribute("color", color)
+        if bp.has_attribute("driver_id"):
+            driver_id = random.choice(bp.get_attribute("driver_id").recommended_values)
+            bp.set_attribute("driver_id", driver_id)
+
+        command = carla.command.SpawnActor(bp, transform).then(
+            carla.command.SetAutopilot(carla.command.FutureActor, True, traffic_manager_port)
+        )
+        commands.append(command)
+
+    responses = client.apply_batch_sync(commands, True)
+    actor_ids = [r.actor_id for r in responses if not r.error]
+
+    if logger is not None:
+        logger.info("Spawned %d/%d NPC vehicles.", len(actor_ids), vehicle_count)
+        for response in responses:
+            if response.error:
+                logger.warning("NPC vehicle spawn error: %s", response.error)
+    return actor_ids
+
+
 def capture_single_image(world, camera, timeout_seconds: float = 5.0):
     image_queue = queue.Queue(maxsize=1)
     camera.listen(image_queue.put)
@@ -125,3 +256,12 @@ def cleanup_actors(actors, logger) -> None:
                 actor.destroy()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to destroy actor: %s", exc)
+
+
+def cleanup_actor_ids(client, actor_ids, logger) -> None:
+    if not actor_ids:
+        return
+    try:
+        client.apply_batch([carla.command.DestroyActor(actor_id) for actor_id in actor_ids])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to cleanup actor ids: %s", exc)
