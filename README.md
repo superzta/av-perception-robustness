@@ -31,8 +31,8 @@ Across four stress families:
 ### 1) Clone the repository
 
 ```powershell
-git clone <your-repo-url>
-cd <repo-folder>
+git clone https://github.com/superzta/av-perception-robustness.git
+cd av-perception-robustness
 ```
 
 ### 2) Create and activate a virtual environment
@@ -56,7 +56,7 @@ This project expects a packaged CARLA install (not a source build). Download CAR
 
 Recommended local path:
 
-- `<repo-root>\carla\`
+- `av-perception-robustness\carla\`
 
 The folder is already git-ignored, so it will not be committed.
 
