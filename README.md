@@ -2,7 +2,7 @@
 
 Comparative study of camera-only and camera+LiDAR fusion perception pipelines in CARLA under environmental degradation and adversarial perturbations.
 
-This repository is designed to be reproducible, presentation-ready, and practical for course research: one command can run the full episode-based workflow and generate figures, tables, logs, and report assets.
+This repository is designed to be reproducible and presentation-ready: one command runs the full episode-based workflow and generates tables, plots, screenshots, and report assets.
 
 ## Research Scope
 
@@ -22,33 +22,55 @@ Across four stress families:
 
 - `scripts/` experiment runners and utilities
 - `configs/` reproducible JSON experiment configs
-- `models/` local model weights and checkpoints (git-ignored)
+- `models/` local model weights (git-ignored)
 - `outputs/` all runtime artifacts (logs, images, tables, plots, assets)
-- `docs/` report notes and supporting documentation
+- `README.md`, `requirements.txt`, `.gitignore`
 
-## Environment
+## Setup
 
-- OS: Windows 11
-- Simulator: packaged CARLA at `D:\18662_Project\carla`
-- Python venv: `D:\18662_Project\venv`
+### 1) Clone the repository
 
-Activate environment:
+```powershell
+git clone <your-repo-url>
+cd <repo-folder>
+```
 
-- PowerShell: `D:\18662_Project\venv\Scripts\Activate.ps1`
+### 2) Create and activate a virtual environment
 
-Install core dependencies:
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+```
 
-- `pip install numpy pillow matplotlib opencv-python ultralytics`
+### 3) Install Python dependencies
 
-YOLO default weights location:
+```powershell
+pip install -r requirements.txt
+```
 
-- `models\weights\yolo\yolov8n.pt`
+### 4) Install CARLA (packaged release)
+
+This project expects a packaged CARLA install (not a source build). Download CARLA from the official release page:
+
+- [CARLA Releases](https://github.com/carla-simulator/carla/releases)
+
+Recommended local path:
+
+- `<repo-root>\carla\`
+
+The folder is already git-ignored, so it will not be committed.
+
+### 5) Start CARLA server
+
+From your CARLA folder:
+
+```powershell
+.\CarlaUE4.exe
+```
 
 ## Quick Start
 
-1. Start CARLA server separately.
-2. Activate the virtual environment.
-3. Run a baseline pipeline or run the full workflow.
+Run one baseline, or run the full study workflow.
 
 Camera baseline:
 
@@ -145,13 +167,11 @@ Main config fields (see `configs\full_pipeline_config.json`):
 - episode retries and consecutive-failure stop guard
 - heartbeat logging during long-running episodes
 
-## Notes for GitHub Portfolio
+## GitHub Notes
 
-This repository intentionally prioritizes:
-
-- clear experiment design over overly complex abstractions
-- practical attack/fusion baselines suitable for academic projects
-- reproducible output structure for report and slide generation
+- `carla/`, `models/`, `outputs/`, and `venv/` are git-ignored.
+- No `data/` folder is required for this project setup.
+- No `docs/` folder is required to run experiments; report assets are generated under `outputs/`.
 
 If you are reviewing this project, start with:
 

@@ -1,4 +1,5 @@
-venv/
+/venv/
+/.venv/
 __pycache__/
 *.pyc
 .idea/
@@ -10,7 +11,7 @@ checkpoints/
 datasets/
 models/
 
-carla/
+/carla/
 *.egg-info/
 build/
 dist/
