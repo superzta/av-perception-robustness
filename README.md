@@ -29,6 +29,9 @@ Camera-only vs sensor-fusion perception robustness experiments in CARLA under ad
    - `python scripts\run_fusion_baseline.py --config configs\stage3_fusion_daylight.json`
 8. Run Stage 4 controlled robustness sweep (camera-only + fusion):
    - `python scripts\run_stage4_scenarios.py --scenario-config configs\stage4_scenarios.json`
+9. Run Stage 5 adversarial attack evaluation (camera-only or fusion):
+   - Camera attack example: `python scripts\run_attack_evaluation.py --pipeline camera_only --config configs\stage5_camera_attack.json`
+   - LiDAR spoofing example: `python scripts\run_attack_evaluation.py --pipeline fusion --config configs\stage5_lidar_spoof_attack.json`
 
 Outputs are written to:
 - `outputs\logs`
@@ -56,6 +59,16 @@ For Stage 4, report-ready comparison outputs are organized as:
 - `outputs\stage4_report\representative_screenshots\<scenario>_camera.png`
 - `outputs\stage4_report\representative_screenshots\<scenario>_fusion.png`
 - `outputs\stage4_report\generated_configs\`
+
+For Stage 5 attack outputs are organized as:
+- `outputs\attacks\<pipeline>\<run_id>\rgb_clean\`
+- `outputs\attacks\<pipeline>\<run_id>\rgb_attacked\`
+- `outputs\attacks\<pipeline>\<run_id>\annotated_clean\`
+- `outputs\attacks\<pipeline>\<run_id>\annotated_attacked\`
+- `outputs\attacks\<pipeline>\<run_id>\lidar_clean\` and `lidar_attacked\` (fusion)
+- `outputs\attacks\<pipeline>\<run_id>\lidar_bev_clean\` and `lidar_bev_attacked\` (fusion)
+- `outputs\attacks\<pipeline>\<run_id>\logs\<run_id>_frame_attack_log.csv`
+- `outputs\attacks\<pipeline>\<run_id>\logs\<run_id>.log`
 
 YOLO weight path is set to:
 - `models\weights\yolo\yolov8n.pt`
@@ -95,9 +108,10 @@ The runner reads one JSON file with:
 - It records frame-level failure flags (`missed_detection_flag`, `unstable_classification_flag`) and writes an aggregated side-by-side summary CSV.
 
 ### 5) Adversarial attack implementation
-- Enable and parameterize attack settings in `attacks`.
-- Add patch, spoofing, and blinding logic modules incrementally.
-- Track both perception failures and downstream driving impact.
+- Use `python scripts\run_attack_evaluation.py --pipeline <camera_only|fusion> --config <stage5_config.json>`.
+- Camera attacks support practical glare/overexposure and patch-style perturbation in the RGB processing path.
+- LiDAR attacks support spoofing via phantom point cluster injection in the LiDAR processing path.
+- The runner writes before/after artifacts, per-frame change flags (`detection_changed`, `decision_changed`), obstacle-point counters, and heartbeat logs every 10 processed frames.
 
 ### 6) Evaluation, visualization, report/presentation
 - Generate comparative plots/tables in `outputs\plots` and `outputs\tables`.
