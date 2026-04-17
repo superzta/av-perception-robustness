@@ -32,6 +32,8 @@ Camera-only vs sensor-fusion perception robustness experiments in CARLA under ad
 9. Run Stage 5 adversarial attack evaluation (camera-only or fusion):
    - Camera attack example: `python scripts\run_attack_evaluation.py --pipeline camera_only --config configs\stage5_camera_attack.json`
    - LiDAR spoofing example: `python scripts\run_attack_evaluation.py --pipeline fusion --config configs\stage5_lidar_spoof_attack.json`
+10. Run Stage 6 evaluation + report asset generation:
+   - `python scripts\generate_stage6_assets.py`
 
 Outputs are written to:
 - `outputs\logs`
@@ -69,6 +71,17 @@ For Stage 5 attack outputs are organized as:
 - `outputs\attacks\<pipeline>\<run_id>\lidar_bev_clean\` and `lidar_bev_attacked\` (fusion)
 - `outputs\attacks\<pipeline>\<run_id>\logs\<run_id>_frame_attack_log.csv`
 - `outputs\attacks\<pipeline>\<run_id>\logs\<run_id>.log`
+
+For Stage 6 evaluation/report assets are organized as:
+- `outputs\tables\stage6_scenario_metrics.csv`
+- `outputs\tables\stage6_attack_metrics.csv`
+- `outputs\tables\stage6_condition_metrics.csv`
+- `outputs\tables\stage6_presentation_outline.md`
+- `outputs\tables\stage6_report_outline.md`
+- `outputs\plots\stage6_mean_detection_by_scenario.png`
+- `outputs\plots\stage6_precision_recall_by_condition.png`
+- `outputs\plots\stage6_attack_decision_change_rate.png`
+- `outputs\plots\stage6_representative_screenshots\`
 
 YOLO weight path is set to:
 - `models\weights\yolo\yolov8n.pt`

@@ -14,3 +14,5 @@ carla/
 *.egg-info/
 build/
 dist/
+
+outputs_test_original/
