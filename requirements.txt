@@ -3,3 +3,5 @@ pillow
 opencv-python
 ultralytics
 matplotlib
+torch
+torchvision

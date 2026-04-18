@@ -91,6 +91,8 @@
   "detector": {
     "backend": "ultralytics",
     "model": "models/weights/yolo/yolov8n.pt",
+    "device": "cuda:0",
+    "require_cuda": true,
     "confidence_threshold": 0.25,
     "require_yolo": true,
     "target_classes": [
@@ -105,11 +107,17 @@
     ]
   },
   "fusion": {
-    "mode": "late_fusion_rgb_with_lidar_confirmation",
+    "mode": "pointpainting_semantic_fusion",
+    "require_pointpainting": true,
+    "segmentation_model": "deeplabv3_resnet50",
+    "segmentation_device": "cuda:0",
     "min_lidar_points_in_bbox": 8,
     "min_depth_m": 0.5,
     "max_depth_m": 60.0,
-    "unconfirmed_confidence_penalty": 0.6
+    "unconfirmed_confidence_penalty": 0.6,
+    "semantic_match_min_ratio": 0.15,
+    "semantic_match_min_score": 0.3,
+    "semantic_bonus_confidence": 0.08
   },
   "decision": {
     "fusion_obstacle_point_threshold": 45,

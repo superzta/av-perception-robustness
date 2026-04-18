@@ -18,7 +18,10 @@ class YoloDetector:
         self.confidence_threshold = float(detector_cfg.get("confidence_threshold", 0.25))
         self.target_classes = set(detector_cfg.get("target_classes", []))
         self.require_yolo = bool(detector_cfg.get("require_yolo", True))
+        self.device = str(detector_cfg.get("device", "auto")).lower()
+        self.require_cuda = bool(detector_cfg.get("require_cuda", False))
         self._model = None
+        self._predict_device = None
 
         try:
             from ultralytics import YOLO
@@ -30,7 +33,14 @@ class YoloDetector:
 
         model_source = self._resolve_local_model_source(Path(self.model_name).resolve(), YOLO)
         self._model = YOLO(str(model_source))
+        self._predict_device = self._resolve_predict_device()
+        if self.require_cuda and (self._predict_device is None or not str(self._predict_device).startswith("cuda")):
+            raise RuntimeError(
+                "YOLO configured with require_cuda=true but CUDA is unavailable. "
+                "Install CUDA-enabled PyTorch and verify torch.cuda.is_available()."
+            )
         self.logger.info("Loaded YOLO model: %s", str(model_source))
+        self.logger.info("YOLO inference device: %s", self._predict_device if self._predict_device else "auto")
 
     @property
     def enabled(self) -> bool:
@@ -53,6 +63,16 @@ class YoloDetector:
 
         return default_name
 
+    def _resolve_predict_device(self):
+        if self.device == "auto":
+            try:
+                import torch
+
+                return "cuda:0" if torch.cuda.is_available() else "cpu"
+            except Exception:  # noqa: BLE001
+                return None
+        return self.device
+
     def detect(self, frame_bgr: np.ndarray) -> List[dict]:
         if not self.enabled:
             return []
@@ -61,6 +81,7 @@ class YoloDetector:
             source=frame_bgr,
             conf=self.confidence_threshold,
             verbose=False,
+            device=self._predict_device,
         )
         if not results:
             return []

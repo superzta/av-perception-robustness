@@ -248,17 +248,18 @@ def spawn_npc_vehicles(
     traffic_manager.set_random_device_seed(seed)
 
     spawn_points = world.get_map().get_spawn_points()
-    random.Random(seed).shuffle(spawn_points)
+    rng = random.Random(seed)
+    rng.shuffle(spawn_points)
 
     blueprints = world.get_blueprint_library().filter("vehicle.*")
     commands = []
     for transform in spawn_points[:vehicle_count]:
-        bp = random.choice(blueprints)
+        bp = rng.choice(blueprints)
         if bp.has_attribute("color"):
-            color = random.choice(bp.get_attribute("color").recommended_values)
+            color = rng.choice(bp.get_attribute("color").recommended_values)
             bp.set_attribute("color", color)
         if bp.has_attribute("driver_id"):
-            driver_id = random.choice(bp.get_attribute("driver_id").recommended_values)
+            driver_id = rng.choice(bp.get_attribute("driver_id").recommended_values)
             bp.set_attribute("driver_id", driver_id)
 
         command = carla.command.SpawnActor(bp, transform).then(

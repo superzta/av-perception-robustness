@@ -9,7 +9,7 @@ This repository is designed to be reproducible and presentation-ready: one comma
 This project evaluates two perception stacks:
 
 - `camera_only`: RGB + YOLO-based object detection
-- `fusion`: RGB + LiDAR late-fusion baseline (LiDAR confirmation of visual detections)
+- `fusion`: RGB + LiDAR PointPainting-style fusion (semantic painting + 3D point confirmation)
 
 Across four stress families:
 
@@ -156,6 +156,13 @@ Main config fields (see `configs\full_pipeline_config.json`):
 - `sensors`: camera and LiDAR parameters
 - `traffic`, `pedestrians`: scene complexity controls
 - `attacks`: camera and LiDAR perturbation settings
+
+PointPainting settings in `fusion`:
+
+- `mode`: `pointpainting_semantic_fusion`
+- `require_pointpainting`: fail fast if torch/torchvision are unavailable
+- `segmentation_model`: currently `deeplabv3_resnet50`
+- `semantic_match_min_ratio`, `semantic_match_min_score`: semantic confirmation thresholds
 
 ## Reproducibility and Reliability Features
 

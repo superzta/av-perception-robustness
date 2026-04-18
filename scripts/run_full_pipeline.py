@@ -34,7 +34,9 @@ from utils.carla_utils import (
 )
 from utils.decision_utils import camera_decision_from_detections, fusion_decision_from_outputs
 from utils.fusion_utils import (
+    SemanticPointPainter,
     apply_late_fusion,
+    apply_pointpainting_fusion,
     build_camera_intrinsics,
     draw_fusion_detections,
     get_synced_rgb_lidar,
@@ -187,6 +189,10 @@ def sanitize_name(text: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text)
 
 
+def is_success_status(status: str) -> bool:
+    return str(status) in {"completed", "completed_no_visibility"}
+
+
 def write_csv(path: Path, rows: List[dict], fieldnames: List[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fp:
@@ -233,10 +239,29 @@ def stabilize_world(world, logger, duration_seconds: float, tick_timeout_seconds
     logger.info("World stabilization complete: duration=%.1fs ticks=%d", duration_seconds, ticks)
 
 
-def spawn_target_actor(world, spec: EpisodeSpec, ego_spawn_index: int, tm_port: int, logger) -> Optional[carla.Actor]:
+def configure_traffic_manager(client, tm_port: int, seed: int, logger) -> object:
+    tm = client.get_trafficmanager(tm_port)
+    tm.set_synchronous_mode(True)
+    tm.set_random_device_seed(seed)
+    # Conservative spacing reduces collision-heavy artifacts in controlled experiments.
+    tm.set_global_distance_to_leading_vehicle(2.5)
+    tm.global_percentage_speed_difference(0.0)
+    logger.info("TrafficManager configured tm_port=%d seed=%d", tm_port, seed)
+    return tm
+
+
+def spawn_target_actor(
+    world,
+    spec: EpisodeSpec,
+    ego_spawn_index: int,
+    tm_port: int,
+    logger,
+    seed: int,
+) -> Optional[carla.Actor]:
     spawn_points = world.get_map().get_spawn_points()
     if not spawn_points:
         return None
+    rng = random.Random(seed + 707)
     target_type = spec.event.get("target_type", "vehicle")
     offset = int(spec.event.get("target_spawn_offset", 5))
     start_idx = (ego_spawn_index + offset + (spec.episode_index * 3)) % len(spawn_points)
@@ -247,7 +272,7 @@ def spawn_target_actor(world, spec: EpisodeSpec, ego_spawn_index: int, tm_port: 
             return None
         for shift in range(len(spawn_points)):
             idx = (start_idx + shift) % len(spawn_points)
-            actor = world.try_spawn_actor(random.choice(bps), spawn_points[idx])
+            actor = world.try_spawn_actor(rng.choice(bps), spawn_points[idx])
             if actor is not None:
                 logger.info("Spawned target pedestrian id=%s spawn_idx=%s", actor.id, idx)
                 return actor
@@ -256,7 +281,7 @@ def spawn_target_actor(world, spec: EpisodeSpec, ego_spawn_index: int, tm_port: 
     vehicle_bps = world.get_blueprint_library().filter("vehicle.*")
     for shift in range(len(spawn_points)):
         idx = (start_idx + shift) % len(spawn_points)
-        actor = world.try_spawn_actor(random.choice(vehicle_bps), spawn_points[idx])
+        actor = world.try_spawn_actor(rng.choice(vehicle_bps), spawn_points[idx])
         if actor is not None:
             actor.set_autopilot(True, tm_port)
             logger.info("Spawned target vehicle id=%s spawn_idx=%s", actor.id, idx)
@@ -310,8 +335,38 @@ def estimate_target_visibility(
     cam_loc = camera_actor.get_transform().location
     tgt_loc = target_actor.get_transform().location
     distance = float(cam_loc.distance(tgt_loc))
-    # Episode event window is the primary ground-truth proxy for visibility.
-    # Distance is logged for analysis but does not gate visibility, which avoids sparse positives.
+
+    max_distance = float(event_cfg.get("target_distance_max_m", 45.0))
+    if distance > max_distance:
+        return False, distance
+
+    camera_tf = camera_actor.get_transform()
+    forward = camera_tf.get_forward_vector()
+    to_target = carla.Vector3D(
+        x=tgt_loc.x - cam_loc.x,
+        y=tgt_loc.y - cam_loc.y,
+        z=tgt_loc.z - cam_loc.z,
+    )
+    norm = math.sqrt(to_target.x**2 + to_target.y**2 + to_target.z**2)
+    if norm < 1e-6:
+        return False, distance
+    to_unit = carla.Vector3D(x=to_target.x / norm, y=to_target.y / norm, z=to_target.z / norm)
+    cosang = float(forward.x * to_unit.x + forward.y * to_unit.y + forward.z * to_unit.z)
+    fov_half = math.radians(float(camera_fov_degrees) * 0.5)
+    if cosang < math.cos(fov_half):
+        return False, distance
+
+    if bool(event_cfg.get("require_line_of_sight", True)):
+        try:
+            hits = camera_actor.get_world().cast_ray(cam_loc, tgt_loc)
+            for hit in hits:
+                hit_id = int(getattr(hit, "actor_id", 0))
+                if hit_id not in (0, int(target_actor.id), int(camera_actor.id)):
+                    return False, distance
+        except Exception:
+            # Keep compatibility across CARLA builds where cast_ray may differ.
+            pass
+
     return True, distance
 
 
@@ -376,6 +431,7 @@ def run_episode(
     mode: str,
     cfg: dict,
     detector: YoloDetector,
+    point_painter: Optional[SemanticPointPainter],
     out_dirs: Dict[str, Path],
     force_run: bool,
     episode_ordinal: int,
@@ -397,6 +453,8 @@ def run_episode(
     logs_dir = episode_root / "logs"
     for d in [img_raw_dir, img_ann_dir, lidar_clean_dir, lidar_attack_dir, lidar_bev_dir, logs_dir]:
         d.mkdir(parents=True, exist_ok=True)
+    lidar_painted_dir = episode_root / "lidar_painted"
+    lidar_painted_dir.mkdir(parents=True, exist_ok=True)
 
     logger = build_logger(logs_dir / f"{run_id}.log", run_id)
     logger.info(
@@ -435,6 +493,7 @@ def run_episode(
             )
 
         tm_port = int(carla_cfg.get("traffic_manager_port", 8000))
+        _tm = configure_traffic_manager(client, tm_port, spec.seed, logger)
         ego_cfg = cfg["ego_vehicle"]
         ego, actual_spawn_idx = spawn_ego_with_fallback(
             world,
@@ -444,6 +503,7 @@ def run_episode(
             logger=logger,
         )
         actors.append(ego)
+        ego_vehicle_blueprint = ego.type_id
         if bool(ego_cfg.get("autopilot_enabled", True)):
             ego.set_autopilot(True, tm_port)
 
@@ -473,7 +533,8 @@ def run_episode(
         collision_sensor = attach_collision_sensor(world, ego, collision_q, logger)
         actors.append(collision_sensor)
 
-        target_actor = spawn_target_actor(world, spec, actual_spawn_idx, tm_port, logger)
+        target_actor = spawn_target_actor(world, spec, actual_spawn_idx, tm_port, logger, seed=spec.seed)
+        target_actor_blueprint = target_actor.type_id if target_actor is not None else ""
         if target_actor is not None:
             actors.append(target_actor)
 
@@ -521,6 +582,7 @@ def run_episode(
             "rgb_annotated_path",
             "lidar_clean_path",
             "lidar_attacked_path",
+            "lidar_painted_path",
             "lidar_bev_path",
         ]
         writer = csv.DictWriter(frame_fp, fieldnames=fieldnames)
@@ -542,6 +604,7 @@ def run_episode(
         collision_flag = 0
         frame_rows = 0
         representative_frames = []
+        min_visible_frames_required = int(spec.event.get("min_visible_frames_required", 8))
 
         attack_cfg = spec.attacks if mode == "attacked" else {"camera": {"enabled": False}, "lidar": {"enabled": False}}
         logger.info(
@@ -589,9 +652,28 @@ def run_episode(
                 lidar_used = None
 
             detections = detector.detect(rgb_used)
+            point_sem_ids = np.zeros((0,), dtype=np.int32)
+            point_sem_scores = np.zeros((0,), dtype=np.float32)
+            uv = np.zeros((0, 2), dtype=np.float32)
             if pipeline == "fusion":
                 uv, depth = project_lidar_to_image(lidar_used, camera, lidar, intrinsics)
-                outputs = apply_late_fusion(detections, uv, depth, cfg["fusion"])
+                fusion_mode = str(cfg["fusion"].get("mode", "late_fusion")).lower()
+                if fusion_mode.startswith("pointpainting"):
+                    if point_painter is None:
+                        raise RuntimeError("PointPainting mode configured but point_painter is not initialized.")
+                    point_sem_ids, point_sem_scores = point_painter.paint_points(rgb_used, uv)
+                    outputs = apply_pointpainting_fusion(
+                        detections=detections,
+                        projected_uv=uv,
+                        projected_depths=depth,
+                        point_semantic_ids=point_sem_ids,
+                        point_semantic_scores=point_sem_scores,
+                        fusion_cfg=cfg["fusion"],
+                    )
+                else:
+                    point_sem_ids = np.zeros((uv.shape[0],), dtype=np.int32)
+                    point_sem_scores = np.zeros((uv.shape[0],), dtype=np.float32)
+                    outputs = apply_late_fusion(detections, uv, depth, cfg["fusion"])
                 decision = fusion_decision_from_outputs(outputs, lidar_used, cfg["decision"])
                 detection_count = len(outputs)
                 target_detected, target_confidence = is_target_detected(outputs, spec.event.get("target_type", "vehicle"))
@@ -654,12 +736,21 @@ def run_episode(
 
             lidar_clean_path = ""
             lidar_attack_path = ""
+            lidar_painted_path = ""
             lidar_bev_path = ""
             if pipeline == "fusion":
                 lidar_clean_path = str(lidar_clean_dir / f"frame_{int(rgb_data.frame):06d}.npy")
                 lidar_attack_path = str(lidar_attack_dir / f"frame_{int(rgb_data.frame):06d}.npy")
                 np.save(lidar_clean_path, lidar_clean)
                 np.save(lidar_attack_path, lidar_used)
+                if point_sem_ids.shape[0] == uv.shape[0] and point_sem_ids.shape[0] > 0:
+                    painted = np.zeros((lidar_used.shape[0], 6), dtype=np.float32)
+                    painted[:, :4] = lidar_used[:, :4]
+                    valid_n = min(lidar_used.shape[0], point_sem_ids.shape[0])
+                    painted[:valid_n, 4] = point_sem_ids[:valid_n].astype(np.float32)
+                    painted[:valid_n, 5] = point_sem_scores[:valid_n].astype(np.float32)
+                    lidar_painted_path = str(lidar_painted_dir / f"frame_{int(rgb_data.frame):06d}.npy")
+                    np.save(lidar_painted_path, painted)
                 bev_path = lidar_bev_dir / f"frame_{int(rgb_data.frame):06d}.png"
                 save_lidar_bev(lidar_used, bev_path)
                 lidar_bev_path = str(bev_path)
@@ -694,6 +785,7 @@ def run_episode(
                 "rgb_annotated_path": str(rgb_ann_path),
                 "lidar_clean_path": lidar_clean_path,
                 "lidar_attacked_path": lidar_attack_path,
+                "lidar_painted_path": lidar_painted_path,
                 "lidar_bev_path": lidar_bev_path,
             }
             writer.writerow(row)
@@ -701,14 +793,16 @@ def run_episode(
             representative_frames.append(str(rgb_ann_path))
 
             if frame_rows % heartbeat == 0:
+                lidar_points = int(lidar_used.shape[0]) if (pipeline == "fusion" and lidar_used is not None) else -1
                 logger.info(
-                    "Heartbeat frames=%d tp=%d fp=%d fn=%d stop_missed=%d collision=%d",
+                    "Heartbeat frames=%d tp=%d fp=%d fn=%d stop_missed=%d collision=%d lidar_points=%d",
                     frame_rows,
                     tp,
                     fp,
                     fn,
                     stop_missed,
                     collision_flag,
+                    lidar_points,
                 )
 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -756,12 +850,21 @@ def run_episode(
             "min_obstacle_distance_m": round(min_distance, 4) if not math.isnan(min_distance) else "",
             "collision_flag": int(collision_flag),
             "weather": spec.weather,
+            "ego_vehicle_blueprint": ego_vehicle_blueprint,
+            "target_actor_blueprint": target_actor_blueprint,
             "vehicle_count": spec.vehicle_count,
             "pedestrian_count": spec.pedestrian_count,
             "frame_metrics_csv": str(frame_csv),
             "representative_screenshot": rep_image,
             "duration_seconds": round(time.time() - start_ts, 3),
         }
+        if visible_frames < min_visible_frames_required:
+            summary["status"] = "completed_no_visibility"
+            summary["invalid_reason"] = (
+                f"visible_frames={visible_frames} below minimum "
+                f"{min_visible_frames_required}; excluded from aggregate metrics"
+            )
+            logger.warning("Episode completed but invalid visibility: %s", summary["invalid_reason"])
         save_json(summary_path, summary)
         logger.info("Episode completed frames=%d precision=%.3f recall=%.3f", frame_rows, precision, recall)
         return summary
@@ -933,6 +1036,8 @@ def build_attack_pair_table(episode_rows: List[dict]) -> List[dict]:
             continue
         clean = paired["clean"]
         attacked = paired["attacked"]
+        if clean.get("status") != "completed" or attacked.get("status") != "completed":
+            continue
         if clean["category"] != "adversarial_attacks":
             continue
         clean_frames = read_csv_rows(Path(clean["frame_metrics_csv"]))
@@ -1401,7 +1506,7 @@ def main() -> int:
                 if clean_summary.exists():
                     try:
                         clean_row = load_json(clean_summary)
-                        if clean_row.get("status") == "completed":
+                        if is_success_status(clean_row.get("status")):
                             existing_completed += 1
                             resume_completed_rows[build_run_id(spec, pipeline, "clean")] = clean_row
                     except Exception:
@@ -1411,7 +1516,7 @@ def main() -> int:
                     if attacked_summary.exists():
                         try:
                             attacked_row = load_json(attacked_summary)
-                            if attacked_row.get("status") == "completed":
+                            if is_success_status(attacked_row.get("status")):
                                 existing_completed += 1
                                 resume_completed_rows[build_run_id(spec, pipeline, "attacked")] = attacked_row
                         except Exception:
@@ -1423,6 +1528,7 @@ def main() -> int:
         )
 
     detector = YoloDetector(cfg["detector"], master_log)
+    point_painter = SemanticPointPainter(cfg["fusion"], master_log)
     episode_rows = []
 
     # Track per condition whether we should run attacked pairs.
@@ -1465,13 +1571,14 @@ def main() -> int:
                         mode="clean",
                         cfg=merged_cfg,
                         detector=detector,
+                    point_painter=point_painter,
                         out_dirs=out_dirs,
                         force_run=force_run,
                         episode_ordinal=completed_runs + failed_runs + 1,
                         total_episodes=total_episode_runs,
                         town_switched=town_switched_now,
                     )
-                    if clean.get("status") == "completed":
+                    if is_success_status(clean.get("status")):
                         break
                     if attempt < max_episode_retries:
                         master_log.warning(
@@ -1482,7 +1589,7 @@ def main() -> int:
                         )
                 episode_rows.append(clean)
                 last_town_run = spec.town
-                if clean.get("status") == "completed":
+                if is_success_status(clean.get("status")):
                     completed_runs += 1
                     consecutive_failures = 0
                 else:
@@ -1527,13 +1634,14 @@ def main() -> int:
                         mode="attacked",
                         cfg=merged_cfg,
                         detector=detector,
+                        point_painter=point_painter,
                         out_dirs=out_dirs,
                         force_run=force_run,
                         episode_ordinal=completed_runs + failed_runs + 1,
                         total_episodes=total_episode_runs,
                         town_switched=town_switched_now,
                     )
-                    if attacked.get("status") == "completed":
+                    if is_success_status(attacked.get("status")):
                         break
                     if attempt < max_episode_retries:
                         master_log.warning(
@@ -1543,7 +1651,7 @@ def main() -> int:
                             max_episode_retries,
                         )
                 episode_rows.append(attacked)
-                if attacked.get("status") == "completed":
+                if is_success_status(attacked.get("status")):
                     completed_runs += 1
                     consecutive_failures = 0
                 else:
@@ -1601,6 +1709,8 @@ def main() -> int:
         "false_stop_rate",
         "min_obstacle_distance_m",
         "collision_flag",
+        "ego_vehicle_blueprint",
+        "target_actor_blueprint",
         "vehicle_count",
         "pedestrian_count",
         "frame_metrics_csv",
