@@ -1445,6 +1445,464 @@ def make_plots(plots_dir: Path, condition_rows: List[dict], attack_rows: List[di
         plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# Paper-level visualizations
+# ---------------------------------------------------------------------------
+
+_PAPER_CATEGORY_ORDER = [
+    ("normal", "Baseline"),
+    ("adverse_weather_low_visibility", "Weather / Low Vis."),
+    ("viewpoint_variation", "Viewpoint"),
+    ("adversarial_attacks", "Attack"),
+]
+_PIPELINE_ORDER = ["camera_only", "fusion"]
+_PIPELINE_LABEL = {"camera_only": "Camera-only", "fusion": "Camera+LiDAR"}
+_PIPELINE_COLOR = {"camera_only": "#d95f02", "fusion": "#1b9e77"}
+
+
+def _completed_episodes(episode_rows: List[dict]) -> List[dict]:
+    return [r for r in episode_rows if r.get("status") == "completed"]
+
+
+def _float_or(value, default: float = float("nan")) -> float:
+    try:
+        s = str(value).strip()
+        if s == "":
+            return default
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def _mean_ci(values: List[float]) -> Tuple[float, float]:
+    """Return (mean, 95% CI half-width). Falls back to std/sqrt(n) if n<3."""
+    arr = np.asarray([v for v in values if not math.isnan(v)], dtype=float)
+    if arr.size == 0:
+        return (float("nan"), 0.0)
+    mean = float(arr.mean())
+    if arr.size < 2:
+        return (mean, 0.0)
+    se = float(arr.std(ddof=1)) / math.sqrt(arr.size)
+    return (mean, 1.96 * se)
+
+
+def build_category_level_table(episode_rows: List[dict]) -> List[dict]:
+    """Aggregate by (category, pipeline). Directly matches the paper's abstract grouping."""
+    completed = _completed_episodes(episode_rows)
+    buckets: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+    for row in completed:
+        buckets[(row["category"], row["pipeline"])].append(row)
+
+    fields = [
+        "precision",
+        "recall",
+        "false_positive_rate",
+        "false_negative_rate",
+        "correct_stop_rate",
+        "missed_stop_rate",
+        "false_stop_rate",
+        "real_correct_stop_rate",
+        "real_missed_stop_rate",
+        "real_false_stop_rate",
+        "collision_flag",
+    ]
+    rows = []
+    for (category, pipeline), bucket in sorted(buckets.items()):
+        entry = {
+            "category": category,
+            "pipeline": pipeline,
+            "episodes": len(bucket),
+        }
+        for f in fields:
+            vals = [_float_or(r.get(f)) for r in bucket]
+            mean, ci = _mean_ci(vals)
+            entry[f"{f}_mean"] = round(mean, 6) if not math.isnan(mean) else ""
+            entry[f"{f}_ci95"] = round(ci, 6)
+        rows.append(entry)
+
+    # Add fusion-vs-camera delta rows per category for easy reading.
+    by_cat: Dict[str, Dict[str, dict]] = defaultdict(dict)
+    for r in rows:
+        by_cat[r["category"]][r["pipeline"]] = r
+    delta_rows = []
+    for category, per_pipeline in by_cat.items():
+        if "camera_only" not in per_pipeline or "fusion" not in per_pipeline:
+            continue
+        c = per_pipeline["camera_only"]
+        f = per_pipeline["fusion"]
+        delta = {"category": category, "pipeline": "fusion_minus_camera", "episodes": ""}
+        for field in fields:
+            try:
+                delta[f"{field}_mean"] = round(float(f[f"{field}_mean"]) - float(c[f"{field}_mean"]), 6)
+            except (TypeError, ValueError):
+                delta[f"{field}_mean"] = ""
+            delta[f"{field}_ci95"] = ""
+        delta_rows.append(delta)
+    rows.extend(delta_rows)
+    return rows
+
+
+def make_paper_plots(
+    plots_dir: Path,
+    episode_rows: List[dict],
+    condition_rows: List[dict],
+    attack_rows: List[dict],
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    """Conference-paper-quality figures rendered from already-recorded data."""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import TwoSlopeNorm
+    except ImportError:
+        if logger is not None:
+            logger.warning("matplotlib not available; skipping paper plots.")
+        return
+
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    plt.rcParams.update({
+        "font.family": "DejaVu Sans",
+        "font.size": 11,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "legend.frameon": False,
+        "savefig.bbox": "tight",
+    })
+
+    completed = _completed_episodes(episode_rows)
+    if not completed:
+        if logger is not None:
+            logger.info("No completed episodes; skipping paper plots.")
+        return
+
+    # -------------------------------------------------------------------
+    # Figure 1: Fusion-minus-camera delta heatmap (condition x metric)
+    # -------------------------------------------------------------------
+    metric_spec = [
+        ("recall_mean", "Recall", +1),
+        ("precision_mean", "Precision", +1),
+        ("correct_stop_rate_mean", "Correct stop", +1),
+        ("missed_stop_rate_mean", "Missed stop", -1),
+        ("false_stop_rate_mean", "False stop", -1),
+        ("first_detection_latency_mean", "Det. latency", -1),
+    ]
+    metric_labels = [label for _, label, _ in metric_spec]
+    conditions_ordered = []
+    for cat, _ in _PAPER_CATEGORY_ORDER:
+        cat_conds = sorted({r["condition_name"] for r in condition_rows if r["category"] == cat})
+        conditions_ordered.extend(cat_conds)
+    extras = sorted({r["condition_name"] for r in condition_rows} - set(conditions_ordered))
+    conditions_ordered.extend(extras)
+
+    data = np.full((len(conditions_ordered), len(metric_spec)), np.nan)
+    for i, cond in enumerate(conditions_ordered):
+        cam = next((r for r in condition_rows if r["condition_name"] == cond and r["pipeline"] == "camera_only"), None)
+        fus = next((r for r in condition_rows if r["condition_name"] == cond and r["pipeline"] == "fusion"), None)
+        if cam is None or fus is None:
+            continue
+        for j, (field, _, sign) in enumerate(metric_spec):
+            c = _float_or(cam.get(field))
+            f = _float_or(fus.get(field))
+            if math.isnan(c) or math.isnan(f):
+                continue
+            data[i, j] = sign * (f - c)  # normalize so + always means fusion better
+
+    fig, ax = plt.subplots(figsize=(7.2, max(4.0, 0.42 * len(conditions_ordered) + 1.0)), dpi=200)
+    finite = data[np.isfinite(data)]
+    if finite.size:
+        vmax = max(0.05, float(np.nanmax(np.abs(finite))))
+    else:
+        vmax = 0.1
+    norm = TwoSlopeNorm(vcenter=0.0, vmin=-vmax, vmax=vmax)
+    im = ax.imshow(data, cmap="RdBu_r", norm=norm, aspect="auto")
+    ax.set_xticks(range(len(metric_labels)))
+    ax.set_xticklabels(metric_labels, rotation=20, ha="right")
+    ax.set_yticks(range(len(conditions_ordered)))
+    ax.set_yticklabels(conditions_ordered, fontsize=9)
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            v = data[i, j]
+            if math.isnan(v):
+                ax.text(j, i, "-", ha="center", va="center", fontsize=8, color="#444")
+            else:
+                color = "white" if abs(v) > 0.55 * vmax else "black"
+                ax.text(j, i, f"{v:+.02f}", ha="center", va="center", fontsize=8, color=color)
+    cbar = fig.colorbar(im, ax=ax, shrink=0.85)
+    cbar.set_label("Fusion advantage  (+ = fusion better)")
+    ax.set_title("Where fusion helps and where it does not\n(condition x metric, sign-normalized delta)")
+    fig.tight_layout()
+    fig.savefig(plots_dir / "full_pipeline_paper_delta_heatmap.png")
+    plt.close(fig)
+
+    # -------------------------------------------------------------------
+    # Figure 2: Category-level panels with 95% CI and per-episode dots
+    # -------------------------------------------------------------------
+    panel_metrics = [
+        ("recall", "Recall"),
+        ("precision", "Precision"),
+        ("missed_stop_rate", "Missed stop rate"),
+        ("false_stop_rate", "False stop rate"),
+    ]
+    cats_present = [(cat, label) for cat, label in _PAPER_CATEGORY_ORDER
+                    if any(r["category"] == cat for r in completed)]
+    if cats_present:
+        fig, axes = plt.subplots(1, len(cats_present), figsize=(3.4 * len(cats_present), 4.2), dpi=200, sharey=False)
+        if len(cats_present) == 1:
+            axes = [axes]
+        width = 0.36
+        rng = np.random.default_rng(42)
+        for ax, (cat, label) in zip(axes, cats_present):
+            positions = np.arange(len(panel_metrics))
+            for i, pipeline in enumerate(_PIPELINE_ORDER):
+                subset = [r for r in completed if r["category"] == cat and r["pipeline"] == pipeline]
+                means, errs = [], []
+                for field, _ in panel_metrics:
+                    vals = [_float_or(r.get(field)) for r in subset]
+                    m, ci = _mean_ci(vals)
+                    means.append(m if not math.isnan(m) else 0.0)
+                    errs.append(ci)
+                offsets = positions + (i - 0.5) * width
+                ax.bar(offsets, means, width=width, color=_PIPELINE_COLOR[pipeline],
+                       label=_PIPELINE_LABEL[pipeline], yerr=errs, capsize=3, alpha=0.85,
+                       edgecolor="black", linewidth=0.5)
+                for p, (field, _) in zip(positions, panel_metrics):
+                    vals = [_float_or(r.get(field)) for r in subset]
+                    vals = [v for v in vals if not math.isnan(v)]
+                    if not vals:
+                        continue
+                    jitter = rng.uniform(-0.06, 0.06, size=len(vals))
+                    ax.scatter(np.full(len(vals), p + (i - 0.5) * width) + jitter, vals,
+                               s=10, color="black", alpha=0.55, zorder=3, linewidths=0)
+            ax.set_xticks(positions)
+            ax.set_xticklabels([m[1] for m in panel_metrics], rotation=18, ha="right", fontsize=9)
+            ax.set_ylim(0.0, 1.05)
+            ax.set_title(label)
+            ax.grid(axis="y", alpha=0.25)
+        axes[0].set_ylabel("Score / Rate")
+        axes[0].legend(loc="upper right", fontsize=9)
+        fig.suptitle("Camera-only vs Camera+LiDAR by scenario category (95% CI, episode dots)")
+        fig.tight_layout()
+        fig.savefig(plots_dir / "full_pipeline_paper_category_panels.png")
+        plt.close(fig)
+
+    # -------------------------------------------------------------------
+    # Figure 3: Attack-robustness scatter (detection vs decision change rate)
+    # -------------------------------------------------------------------
+    if attack_rows:
+        fig, ax = plt.subplots(figsize=(6.4, 5.4), dpi=200)
+        for pipeline in _PIPELINE_ORDER:
+            subset = [r for r in attack_rows if r["pipeline"] == pipeline]
+            xs = [_float_or(r.get("detection_change_rate")) for r in subset]
+            ys = [_float_or(r.get("decision_change_rate_under_attack")) for r in subset]
+            ax.scatter(xs, ys, s=42, color=_PIPELINE_COLOR[pipeline], alpha=0.65,
+                       edgecolor="black", linewidth=0.4, label=_PIPELINE_LABEL[pipeline])
+            if xs and ys:
+                mx = float(np.nanmean(xs))
+                my = float(np.nanmean(ys))
+                ax.scatter([mx], [my], s=220, color=_PIPELINE_COLOR[pipeline],
+                           marker="X", edgecolor="black", linewidth=1.2,
+                           label=f"{_PIPELINE_LABEL[pipeline]} mean", zorder=5)
+        lim = 1.0
+        ax.plot([0, lim], [0, lim], linestyle="--", color="grey", linewidth=0.8, alpha=0.6)
+        ax.set_xlim(-0.02, lim)
+        ax.set_ylim(-0.02, lim)
+        ax.set_xlabel("Detection change rate under attack")
+        ax.set_ylabel("Decision change rate under attack")
+        ax.set_title("Attack robustness: per-episode perception vs. decision disruption\n"
+                     "(closer to origin = more robust)")
+        ax.grid(alpha=0.25)
+        ax.legend(loc="upper left", fontsize=9)
+        fig.tight_layout()
+        fig.savefig(plots_dir / "full_pipeline_paper_attack_robustness_scatter.png")
+        plt.close(fig)
+
+    # -------------------------------------------------------------------
+    # Figure 4: Radar (spider) chart per category
+    # -------------------------------------------------------------------
+    radar_fields = [
+        ("recall_mean", "Recall", False),
+        ("precision_mean", "Precision", False),
+        ("correct_stop_rate_mean", "Correct stop", False),
+        ("missed_stop_rate_mean", "1 - Missed stop", True),
+        ("false_stop_rate_mean", "1 - False stop", True),
+    ]
+    radar_cats = [(cat, label) for cat, label in _PAPER_CATEGORY_ORDER
+                  if any(r["category"] == cat for r in condition_rows)]
+    if radar_cats:
+        n_axes = len(radar_fields)
+        angles = np.linspace(0, 2 * np.pi, n_axes, endpoint=False).tolist()
+        angles += angles[:1]
+        ncols = min(2, len(radar_cats))
+        nrows = int(np.ceil(len(radar_cats) / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 4.8 * nrows),
+                                 dpi=200, subplot_kw={"projection": "polar"})
+        axes = np.atleast_1d(axes).flatten()
+        for ax, (cat, label) in zip(axes, radar_cats):
+            for pipeline in _PIPELINE_ORDER:
+                subset = [r for r in condition_rows if r["category"] == cat and r["pipeline"] == pipeline]
+                if not subset:
+                    continue
+                values = []
+                for field, _, invert in radar_fields:
+                    v = float(np.nanmean([_float_or(r.get(field)) for r in subset]))
+                    if math.isnan(v):
+                        v = 0.0
+                    values.append(1.0 - v if invert else v)
+                values.append(values[0])
+                ax.plot(angles, values, color=_PIPELINE_COLOR[pipeline], linewidth=2,
+                        label=_PIPELINE_LABEL[pipeline])
+                ax.fill(angles, values, color=_PIPELINE_COLOR[pipeline], alpha=0.18)
+            ax.set_xticks(angles[:-1])
+            ax.set_xticklabels([f[1] for f in radar_fields], fontsize=9)
+            ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+            ax.set_yticklabels(["0.25", "0.50", "0.75", "1.00"], fontsize=7)
+            ax.set_ylim(0.0, 1.0)
+            ax.set_title(label, pad=14)
+        for ax in axes[len(radar_cats):]:
+            ax.axis("off")
+        axes[0].legend(loc="upper right", bbox_to_anchor=(1.45, 1.1), fontsize=9)
+        fig.suptitle("Robustness profile per scenario category (larger area = more robust)",
+                     y=1.02, fontsize=13)
+        fig.tight_layout()
+        fig.savefig(plots_dir / "full_pipeline_paper_radar_by_category.png")
+        plt.close(fig)
+
+    # -------------------------------------------------------------------
+    # Figure 5: Decision / detection change violin under attack
+    # -------------------------------------------------------------------
+    if attack_rows:
+        fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.4), dpi=200, sharey=False)
+        violin_fields = [
+            ("detection_change_rate", "Detection change rate"),
+            ("decision_change_rate_under_attack", "Decision change rate"),
+        ]
+        for ax, (field, label) in zip(axes, violin_fields):
+            data_per_pipeline = []
+            for pipeline in _PIPELINE_ORDER:
+                vals = [_float_or(r.get(field)) for r in attack_rows if r["pipeline"] == pipeline]
+                vals = [v for v in vals if not math.isnan(v)]
+                data_per_pipeline.append(vals if vals else [0.0])
+            parts = ax.violinplot(data_per_pipeline, positions=range(len(_PIPELINE_ORDER)),
+                                   showmeans=False, showmedians=True, widths=0.8)
+            for i, body in enumerate(parts["bodies"]):
+                body.set_facecolor(_PIPELINE_COLOR[_PIPELINE_ORDER[i]])
+                body.set_alpha(0.5)
+                body.set_edgecolor("black")
+            for key in ("cbars", "cmins", "cmaxes", "cmedians"):
+                if key in parts:
+                    parts[key].set_color("black")
+                    parts[key].set_linewidth(1.0)
+            rng = np.random.default_rng(7)
+            for i, vals in enumerate(data_per_pipeline):
+                jitter = rng.uniform(-0.08, 0.08, size=len(vals))
+                ax.scatter(np.full(len(vals), i) + jitter, vals, s=16,
+                           color=_PIPELINE_COLOR[_PIPELINE_ORDER[i]],
+                           edgecolor="black", linewidth=0.3, alpha=0.7, zorder=3)
+            ax.set_xticks(range(len(_PIPELINE_ORDER)))
+            ax.set_xticklabels([_PIPELINE_LABEL[p] for p in _PIPELINE_ORDER])
+            ax.set_ylabel(label)
+            ax.set_ylim(-0.02, 1.02)
+            ax.grid(axis="y", alpha=0.25)
+            ax.set_title(label)
+        fig.suptitle("Distribution of attack-induced disruption across episode pairs")
+        fig.tight_layout()
+        fig.savefig(plots_dir / "full_pipeline_paper_attack_violin.png")
+        plt.close(fig)
+
+    # -------------------------------------------------------------------
+    # Figure 6: Representative closed-loop trace (clean vs attacked)
+    # -------------------------------------------------------------------
+    _plot_closed_loop_representative_trace(plots_dir, episode_rows, attack_rows, logger)
+
+
+def _plot_closed_loop_representative_trace(
+    plots_dir: Path,
+    episode_rows: List[dict],
+    attack_rows: List[dict],
+    logger: Optional[logging.Logger],
+) -> None:
+    """Pick the most dramatic attacked/clean episode pair and plot ego traces."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+    if not attack_rows:
+        return
+
+    # Pick the episode pair with largest decision_change_rate_under_attack.
+    attack_rows_sorted = sorted(
+        attack_rows,
+        key=lambda r: _float_or(r.get("decision_change_rate_under_attack"), 0.0),
+        reverse=True,
+    )
+    target_pair = None
+    for cand in attack_rows_sorted:
+        if _float_or(cand.get("decision_change_rate_under_attack"), 0.0) <= 0.0:
+            break
+        ep_idx = cand["episode_index"]
+        cond = cand["condition_name"]
+        pipeline_rows = {}
+        for pipeline in _PIPELINE_ORDER:
+            clean = next((r for r in episode_rows
+                          if r["condition_name"] == cond and r["pipeline"] == pipeline
+                          and r["mode"] == "clean" and r["episode_index"] == ep_idx
+                          and r.get("status") == "completed"), None)
+            attacked = next((r for r in episode_rows
+                             if r["condition_name"] == cond and r["pipeline"] == pipeline
+                             and r["mode"] == "attacked" and r["episode_index"] == ep_idx
+                             and r.get("status") == "completed"), None)
+            if clean is None or attacked is None:
+                pipeline_rows = {}
+                break
+            pipeline_rows[pipeline] = (clean, attacked)
+        if pipeline_rows:
+            target_pair = (cond, ep_idx, pipeline_rows)
+            break
+
+    if target_pair is None:
+        if logger is not None:
+            logger.info("Skipping closed-loop trace plot: no complete pipeline quartet found.")
+        return
+
+    cond, ep_idx, pipeline_rows = target_pair
+    fig, axes = plt.subplots(3, 2, figsize=(11.2, 7.8), dpi=200, sharex=True)
+    metric_rows = [
+        ("ego_speed_mps", "Ego speed (m/s)", None),
+        ("ego_throttle", "Throttle", (0.0, 1.05)),
+        ("ego_brake", "Brake", (0.0, 1.05)),
+    ]
+    for col_idx, pipeline in enumerate(_PIPELINE_ORDER):
+        clean_row, attacked_row = pipeline_rows[pipeline]
+        clean_frames = read_csv_rows(Path(clean_row["frame_metrics_csv"]))
+        attacked_frames = read_csv_rows(Path(attacked_row["frame_metrics_csv"]))
+        for row_idx, (field, label, ylim) in enumerate(metric_rows):
+            ax = axes[row_idx, col_idx]
+            if clean_frames:
+                y_clean = [_float_or(f.get(field)) for f in clean_frames]
+                ax.plot(range(len(y_clean)), y_clean, color="#1b9e77",
+                        linewidth=2, label="Clean")
+            if attacked_frames:
+                y_att = [_float_or(f.get(field)) for f in attacked_frames]
+                ax.plot(range(len(y_att)), y_att, color="#d95f02",
+                        linewidth=2, linestyle="--", label="Attacked")
+            ax.set_ylabel(label)
+            if ylim is not None:
+                ax.set_ylim(ylim)
+            ax.grid(alpha=0.25)
+            if row_idx == 0:
+                ax.set_title(_PIPELINE_LABEL[pipeline])
+            if row_idx == 0 and col_idx == 0:
+                ax.legend(loc="upper left", fontsize=9)
+        axes[-1, col_idx].set_xlabel("Frame index")
+
+    fig.suptitle(f"Closed-loop behavior under attack - condition: {cond}, episode {ep_idx}")
+    fig.tight_layout()
+    fig.savefig(plots_dir / "full_pipeline_paper_closed_loop_trace.png")
+    plt.close(fig)
+
+
 def write_findings_and_outlines(
     report_dir: Path,
     presentation_dir: Path,
@@ -1939,6 +2397,35 @@ def main() -> int:
 
     # Plots + screenshots + markdown assets.
     make_plots(out_dirs["plots"], condition_rows, attack_rows)
+
+    # Paper-level visualizations (heatmap, radar, attack scatter, violin, traces).
+    try:
+        make_paper_plots(
+            out_dirs["plots"],
+            episode_rows=episode_rows,
+            condition_rows=condition_rows,
+            attack_rows=attack_rows,
+            logger=master_log,
+        )
+    except Exception as exc:  # noqa: BLE001
+        master_log.warning("make_paper_plots failed: %s", exc)
+
+    # Category-level aggregate CSV matching the abstract's grouping.
+    try:
+        category_rows = build_category_level_table(episode_rows)
+        if category_rows:
+            category_fields = list(category_rows[0].keys())
+            for r in category_rows:
+                for f in category_fields:
+                    r.setdefault(f, "")
+            write_csv(
+                out_dirs["summary_tables"] / "category_level_pipeline_comparison.csv",
+                category_rows,
+                category_fields,
+            )
+    except Exception as exc:  # noqa: BLE001
+        master_log.warning("category_level_pipeline_comparison.csv failed: %s", exc)
+
     shot_index = choose_representative_screenshots(episode_rows, out_dirs["representative_screenshots"])
     write_csv(
         out_dirs["summary_tables"] / "representative_screenshots_index.csv",
@@ -1958,6 +2445,7 @@ def main() -> int:
         "condition_level_aggregate_metrics.csv",
         "attack_summary_table.csv",
         "top_failure_cases.csv",
+        "category_level_pipeline_comparison.csv",
     ]:
         src = out_dirs["summary_tables"] / filename
         if src.exists():
