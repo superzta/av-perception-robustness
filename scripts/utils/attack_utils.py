@@ -145,7 +145,13 @@ def save_lidar_bev(points_xyzi: np.ndarray, output_path: Path, x_lim=(-5.0, 30.0
     try:
         import cv2
 
-        cv2.imwrite(str(output_path), canvas)
+        suffix = output_path.suffix.lower()
+        if suffix in (".jpg", ".jpeg"):
+            cv2.imwrite(str(output_path), canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        elif suffix == ".png":
+            cv2.imwrite(str(output_path), canvas, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
+        else:
+            cv2.imwrite(str(output_path), canvas)
     except ImportError:
         from PIL import Image
 

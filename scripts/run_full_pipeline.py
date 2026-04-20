@@ -32,6 +32,7 @@ from utils.carla_utils import (
     spawn_ego_vehicle,
     spawn_npc_vehicles,
 )
+from utils.control_utils import ControllerConfig, PerceptionDrivingController
 from utils.decision_utils import camera_decision_from_detections, fusion_decision_from_outputs
 from utils.fusion_utils import (
     SemanticPointPainter,
@@ -69,8 +70,36 @@ def load_json(path: Path) -> dict:
         return json.load(f)
 
 
+def _as_posix(value) -> str:
+    """Return a string with forward-slash separators.
+
+    Useful when serialising Windows paths into JSON so the output is readable
+    (``D:/foo/bar``) instead of escaped Windows paths (``D:\\\\foo\\\\bar``).
+    """
+    if value is None:
+        return ""
+    return str(value).replace("\\", "/")
+
+
+def _normalize_paths_in_place(payload):
+    """Convert any backslash-style path string in ``payload`` to forward slashes."""
+    if isinstance(payload, dict):
+        for k, v in list(payload.items()):
+            if isinstance(v, str) and "\\" in v and ("/" in v or ":" in v or v.endswith((".csv", ".json", ".png", ".jpg", ".jpeg", ".npy", ".log"))):
+                payload[k] = v.replace("\\", "/")
+            elif isinstance(v, (dict, list)):
+                _normalize_paths_in_place(v)
+    elif isinstance(payload, list):
+        for i, item in enumerate(payload):
+            if isinstance(item, str) and "\\" in item:
+                payload[i] = item.replace("\\", "/")
+            elif isinstance(item, (dict, list)):
+                _normalize_paths_in_place(item)
+
+
 def save_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _normalize_paths_in_place(payload)
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
@@ -504,10 +533,21 @@ def run_episode(
         )
         actors.append(ego)
         ego_vehicle_blueprint = ego.type_id
-        if bool(ego_cfg.get("autopilot_enabled", True)):
-            ego.set_autopilot(True, tm_port)
 
-        cam_cfg = json.loads(json.dumps(cfg["sensors"]["camera"]))
+        controller_cfg = ControllerConfig.from_dict(ego_cfg.get("controller"))
+        closed_loop_enabled = str(controller_cfg.mode).lower() == "perception_closed_loop"
+        ego_controller: Optional[PerceptionDrivingController] = None
+        if closed_loop_enabled:
+            ego.set_autopilot(False, tm_port)
+            ego_controller = PerceptionDrivingController(world, ego, controller_cfg, logger)
+            logger.info("Ego control mode=perception_closed_loop (autopilot disabled)")
+        elif bool(ego_cfg.get("autopilot_enabled", True)):
+            ego.set_autopilot(True, tm_port)
+            logger.info("Ego control mode=carla_autopilot")
+        else:
+            logger.info("Ego control mode=manual (no control applied)")
+
+        cam_cfg = dict(cfg["sensors"]["camera"])
         cam_cfg["transform"] = spec.camera_transform
         camera = attach_rgb_camera(world, ego, cam_cfg, logger)
         actors.append(camera)
@@ -578,6 +618,14 @@ def run_episode(
             "fn",
             "front_obstacle_distance_m",
             "collision_flag",
+            "ego_speed_mps",
+            "ego_throttle",
+            "ego_brake",
+            "ego_steer",
+            "control_reason",
+            "actual_stop_ok",
+            "actual_stop_missed",
+            "actual_stop_false",
             "rgb_raw_path",
             "rgb_annotated_path",
             "lidar_clean_path",
@@ -591,16 +639,31 @@ def run_episode(
         total_frames = int(cfg["episode_frames"])
         warmup_frames = int(cfg["warmup_frames"])
         save_every_n = int(cfg["save_every_n"])
+        save_every_n_lidar = int(cfg.get("save_every_n_lidar", save_every_n))
+        save_every_n_lidar_bev = int(cfg.get("save_every_n_lidar_bev", save_every_n_lidar))
+        save_lidar_clean_when_no_attack = bool(cfg.get("save_lidar_clean_when_no_attack", True))
+        image_format = str(cfg.get("image_format", "png")).lower()
+        if image_format not in ("png", "jpg", "jpeg"):
+            image_format = "png"
+        image_ext = "jpg" if image_format in ("jpg", "jpeg") else "png"
+        jpeg_quality = int(cfg.get("jpeg_quality", 88))
+        png_compression = int(cfg.get("png_compression_level", 3))
+        representative_frame_cap = int(cfg.get("representative_frame_cap", 0))
         heartbeat = int(cfg["heartbeat_interval_frames"])
         step_timeout_seconds = float(cfg.get("step_timeout_seconds", 3.0))
         episode_timeout_seconds = float(cfg.get("episode_timeout_seconds", 420.0))
 
         tp = fp = tn = fn = 0
         stop_correct = stop_missed = stop_false = 0
+        real_stop_ok = real_stop_missed = real_stop_false = 0
+        real_speeds: List[float] = []
+        real_brakes: List[float] = []
+        real_throttles: List[float] = []
         visible_frames = missed_visible_frames = 0
         first_visible_frame = None
         first_detect_frame = None
         min_distance = math.nan
+        min_ego_speed = math.nan
         collision_flag = 0
         frame_rows = 0
         representative_frames = []
@@ -729,31 +792,73 @@ def run_episode(
             if not math.isnan(front_distance):
                 min_distance = front_distance if math.isnan(min_distance) else min(min_distance, front_distance)
 
-            rgb_raw_path = img_raw_dir / f"frame_{int(rgb_data.frame):06d}.png"
-            rgb_ann_path = img_ann_dir / f"frame_{int(rgb_data.frame):06d}.png"
-            save_bgr_image(rgb_used, rgb_raw_path)
-            save_bgr_image(annotated, rgb_ann_path)
+            if ego_controller is not None:
+                ctrl_result = ego_controller.step(decision, front_distance)
+                ego_speed_mps = ctrl_result.ego_speed_mps
+                ego_throttle = ctrl_result.throttle
+                ego_brake = ctrl_result.brake
+                ego_steer = ctrl_result.steer
+                control_reason = ctrl_result.reason
+            else:
+                velocity = ego.get_velocity()
+                ego_speed_mps = float(math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2))
+                try:
+                    vc = ego.get_control()
+                    ego_throttle = float(vc.throttle)
+                    ego_brake = float(vc.brake)
+                    ego_steer = float(vc.steer)
+                except Exception:  # noqa: BLE001
+                    ego_throttle = ego_brake = ego_steer = 0.0
+                control_reason = "autopilot" if closed_loop_enabled is False and ego_cfg.get("autopilot_enabled", True) else "manual"
+
+            real_speeds.append(ego_speed_mps)
+            real_throttles.append(ego_throttle)
+            real_brakes.append(ego_brake)
+            min_ego_speed = ego_speed_mps if math.isnan(min_ego_speed) else min(min_ego_speed, ego_speed_mps)
+
+            stop_threshold = float(controller_cfg.stop_speed_threshold_mps)
+            actually_stopped = ego_speed_mps <= stop_threshold
+            actual_stop_ok_flag = int(gt_should_stop and actually_stopped)
+            actual_stop_missed_flag = int(gt_should_stop and (not actually_stopped))
+            actual_stop_false_flag = int((not gt_should_stop) and actually_stopped and ego_brake > 0.5)
+            real_stop_ok += actual_stop_ok_flag
+            real_stop_missed += actual_stop_missed_flag
+            real_stop_false += actual_stop_false_flag
+
+            rgb_raw_path = img_raw_dir / f"frame_{int(rgb_data.frame):06d}.{image_ext}"
+            rgb_ann_path = img_ann_dir / f"frame_{int(rgb_data.frame):06d}.{image_ext}"
+            save_bgr_image(rgb_used, rgb_raw_path, jpeg_quality=jpeg_quality, png_compression=png_compression)
+            save_bgr_image(annotated, rgb_ann_path, jpeg_quality=jpeg_quality, png_compression=png_compression)
 
             lidar_clean_path = ""
             lidar_attack_path = ""
             lidar_painted_path = ""
             lidar_bev_path = ""
             if pipeline == "fusion":
-                lidar_clean_path = str(lidar_clean_dir / f"frame_{int(rgb_data.frame):06d}.npy")
-                lidar_attack_path = str(lidar_attack_dir / f"frame_{int(rgb_data.frame):06d}.npy")
-                np.save(lidar_clean_path, lidar_clean)
-                np.save(lidar_attack_path, lidar_used)
-                if point_sem_ids.shape[0] == uv.shape[0] and point_sem_ids.shape[0] > 0:
-                    painted = np.zeros((lidar_used.shape[0], 6), dtype=np.float32)
-                    painted[:, :4] = lidar_used[:, :4]
-                    valid_n = min(lidar_used.shape[0], point_sem_ids.shape[0])
-                    painted[:valid_n, 4] = point_sem_ids[:valid_n].astype(np.float32)
-                    painted[:valid_n, 5] = point_sem_scores[:valid_n].astype(np.float32)
-                    lidar_painted_path = str(lidar_painted_dir / f"frame_{int(rgb_data.frame):06d}.npy")
-                    np.save(lidar_painted_path, painted)
-                bev_path = lidar_bev_dir / f"frame_{int(rgb_data.frame):06d}.png"
-                save_lidar_bev(lidar_used, bev_path)
-                lidar_bev_path = str(bev_path)
+                lidar_attack_enabled = bool(attack_cfg.get("lidar", {}).get("enabled", False))
+                save_lidar_this_frame = (frame_index % max(1, save_every_n_lidar)) == 0
+                save_bev_this_frame = (frame_index % max(1, save_every_n_lidar_bev)) == 0
+
+                if save_lidar_this_frame:
+                    lidar_attack_path = str(lidar_attack_dir / f"frame_{int(rgb_data.frame):06d}.npy")
+                    np.save(lidar_attack_path, lidar_used)
+                    if lidar_attack_enabled or save_lidar_clean_when_no_attack:
+                        lidar_clean_path = str(lidar_clean_dir / f"frame_{int(rgb_data.frame):06d}.npy")
+                        np.save(lidar_clean_path, lidar_clean)
+
+                    if point_sem_ids.shape[0] == uv.shape[0] and point_sem_ids.shape[0] > 0:
+                        painted = np.zeros((lidar_used.shape[0], 6), dtype=np.float32)
+                        painted[:, :4] = lidar_used[:, :4]
+                        valid_n = min(lidar_used.shape[0], point_sem_ids.shape[0])
+                        painted[:valid_n, 4] = point_sem_ids[:valid_n].astype(np.float32)
+                        painted[:valid_n, 5] = point_sem_scores[:valid_n].astype(np.float32)
+                        lidar_painted_path = str(lidar_painted_dir / f"frame_{int(rgb_data.frame):06d}.npy")
+                        np.save(lidar_painted_path, painted)
+
+                if save_bev_this_frame:
+                    bev_path = lidar_bev_dir / f"frame_{int(rgb_data.frame):06d}.{image_ext}"
+                    save_lidar_bev(lidar_used, bev_path)
+                    lidar_bev_path = str(bev_path)
 
             row = {
                 "run_id": run_id,
@@ -781,21 +886,30 @@ def run_episode(
                 "fn": int(gt_positive and (not pred_positive)),
                 "front_obstacle_distance_m": round(front_distance, 4) if not math.isnan(front_distance) else "",
                 "collision_flag": collision_flag,
-                "rgb_raw_path": str(rgb_raw_path),
-                "rgb_annotated_path": str(rgb_ann_path),
-                "lidar_clean_path": lidar_clean_path,
-                "lidar_attacked_path": lidar_attack_path,
-                "lidar_painted_path": lidar_painted_path,
-                "lidar_bev_path": lidar_bev_path,
+                "ego_speed_mps": round(float(ego_speed_mps), 4),
+                "ego_throttle": round(float(ego_throttle), 4),
+                "ego_brake": round(float(ego_brake), 4),
+                "ego_steer": round(float(ego_steer), 4),
+                "control_reason": control_reason,
+                "actual_stop_ok": actual_stop_ok_flag,
+                "actual_stop_missed": actual_stop_missed_flag,
+                "actual_stop_false": actual_stop_false_flag,
+                "rgb_raw_path": _as_posix(rgb_raw_path),
+                "rgb_annotated_path": _as_posix(rgb_ann_path),
+                "lidar_clean_path": _as_posix(lidar_clean_path),
+                "lidar_attacked_path": _as_posix(lidar_attack_path),
+                "lidar_painted_path": _as_posix(lidar_painted_path),
+                "lidar_bev_path": _as_posix(lidar_bev_path),
             }
             writer.writerow(row)
             frame_rows += 1
-            representative_frames.append(str(rgb_ann_path))
+            if representative_frame_cap <= 0 or len(representative_frames) < representative_frame_cap:
+                representative_frames.append(str(rgb_ann_path))
 
             if frame_rows % heartbeat == 0:
                 lidar_points = int(lidar_used.shape[0]) if (pipeline == "fusion" and lidar_used is not None) else -1
                 logger.info(
-                    "Heartbeat frames=%d tp=%d fp=%d fn=%d stop_missed=%d collision=%d lidar_points=%d",
+                    "Heartbeat frames=%d tp=%d fp=%d fn=%d stop_missed=%d collision=%d lidar_points=%d speed=%.2fm/s thr=%.2f brk=%.2f reason=%s",
                     frame_rows,
                     tp,
                     fp,
@@ -803,6 +917,10 @@ def run_episode(
                     stop_missed,
                     collision_flag,
                     lidar_points,
+                    ego_speed_mps,
+                    ego_throttle,
+                    ego_brake,
+                    control_reason,
                 )
 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -821,6 +939,13 @@ def run_episode(
         correct_stop_rate = stop_correct / gt_stop_frames if gt_stop_frames > 0 else 0.0
         missed_stop_rate = stop_missed / gt_stop_frames if gt_stop_frames > 0 else 0.0
         false_stop_rate = stop_false / non_stop_frames
+
+        real_correct_stop_rate = (real_stop_ok / gt_stop_frames) if gt_stop_frames > 0 else 0.0
+        real_missed_stop_rate = (real_stop_missed / gt_stop_frames) if gt_stop_frames > 0 else 0.0
+        real_false_stop_rate = real_stop_false / non_stop_frames
+        mean_ego_speed = float(sum(real_speeds) / len(real_speeds)) if real_speeds else 0.0
+        mean_throttle = float(sum(real_throttles) / len(real_throttles)) if real_throttles else 0.0
+        mean_brake = float(sum(real_brakes) / len(real_brakes)) if real_brakes else 0.0
 
         rep_image = representative_frames[len(representative_frames) // 2] if representative_frames else ""
         summary = {
@@ -849,13 +974,21 @@ def run_episode(
             "false_stop_rate": round(false_stop_rate, 6),
             "min_obstacle_distance_m": round(min_distance, 4) if not math.isnan(min_distance) else "",
             "collision_flag": int(collision_flag),
+            "control_mode": controller_cfg.mode if closed_loop_enabled else ("autopilot" if ego_cfg.get("autopilot_enabled", True) else "manual"),
+            "real_correct_stop_rate": round(real_correct_stop_rate, 6),
+            "real_missed_stop_rate": round(real_missed_stop_rate, 6),
+            "real_false_stop_rate": round(real_false_stop_rate, 6),
+            "mean_ego_speed_mps": round(mean_ego_speed, 4),
+            "min_ego_speed_mps": round(float(min_ego_speed), 4) if not math.isnan(min_ego_speed) else "",
+            "mean_throttle": round(mean_throttle, 4),
+            "mean_brake": round(mean_brake, 4),
             "weather": spec.weather,
             "ego_vehicle_blueprint": ego_vehicle_blueprint,
             "target_actor_blueprint": target_actor_blueprint,
             "vehicle_count": spec.vehicle_count,
             "pedestrian_count": spec.pedestrian_count,
-            "frame_metrics_csv": str(frame_csv),
-            "representative_screenshot": rep_image,
+            "frame_metrics_csv": _as_posix(frame_csv),
+            "representative_screenshot": _as_posix(rep_image),
             "duration_seconds": round(time.time() - start_ts, 3),
         }
         if visible_frames < min_visible_frames_required:
@@ -881,7 +1014,7 @@ def run_episode(
             "seed": spec.seed,
             "status": "failed",
             "error": str(exc),
-            "frame_metrics_csv": str(frame_csv),
+            "frame_metrics_csv": _as_posix(frame_csv),
             "representative_screenshot": "",
             "duration_seconds": round(time.time() - start_ts, 3),
         }
@@ -998,6 +1131,11 @@ def aggregate_condition_metrics(episode_rows: List[dict]) -> List[dict]:
             "correct_stop_rate",
             "missed_stop_rate",
             "false_stop_rate",
+            "real_correct_stop_rate",
+            "real_missed_stop_rate",
+            "real_false_stop_rate",
+            "mean_ego_speed_mps",
+            "mean_brake",
         ]
         agg = {
             "condition_name": condition_name,

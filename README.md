@@ -18,6 +18,13 @@ Across four stress families:
 - viewpoint variation (front/side/rear/occlusion-style setups)
 - adversarial attacks (camera glare/patch-style effects and LiDAR spoofing)
 
+The ego vehicle is driven in **closed loop** directly from the perception stack:
+throttle, brake, and steering are computed every frame from detection outputs and
+(for fusion) LiDAR-derived front-obstacle distance, and applied to CARLA via
+`VehicleControl`. There is no offline signal in the control path, so attacks on the
+camera or LiDAR can change the actual trajectory of the car, not only the logged
+decision label.
+
 ## Repository Layout
 
 - `scripts/` experiment runners and utilities
@@ -162,7 +169,120 @@ PointPainting settings in `fusion`:
 - `mode`: `pointpainting_semantic_fusion`
 - `require_pointpainting`: fail fast if torch/torchvision are unavailable
 - `segmentation_model`: currently `deeplabv3_resnet50`
+- `segmentation_input_size`: long-side resize for the segmentation input (e.g. `512`). Smaller is faster.
+- `segmentation_half_precision`: run the segmentation backbone in FP16 on CUDA
 - `semantic_match_min_ratio`, `semantic_match_min_score`: semantic confirmation thresholds
+
+## Closed-Loop Autonomous Driving (Perception-in-the-Loop)
+
+Each episode runs a real closed-loop AV stack rather than a purely offline evaluation.
+The controller lives in `scripts\utils\control_utils.py` and is wired into
+`scripts\run_full_pipeline.py`.
+
+Architecture:
+
+- Perception (camera-only or camera+LiDAR PointPainting fusion) produces per-frame
+  detections and, for fusion, a minimum front-obstacle distance from LiDAR.
+- `PerceptionDrivingController` converts that perception output into a
+  `carla.VehicleControl(throttle, brake, steer)` command every synchronous tick.
+- CARLA autopilot is disabled for the ego; the controller's output is the only
+  actuation signal.
+
+Longitudinal control (throttle and brake) is driven entirely by perception:
+
+- Emergency brake when the symbolic decision is `BRAKE`, or when the measured
+  front-obstacle distance is at or below `brake_distance_m`.
+- Soft slow-down (reduced throttle, light brake) when the decision is `SLOW_DOWN`
+  or the front-obstacle distance is at or below `slow_distance_m`.
+- Otherwise a P-controller tracks `target_speed_kmh`.
+
+Lateral control (steering) follows the CARLA map's lane waypoints with a small
+look-ahead pure-pursuit style law. This mirrors how real AV stacks separate
+planning (route/lane following) from perception (when to stop and how hard to brake).
+
+Controller configuration lives under `ego_vehicle.controller` in
+`configs\full_pipeline_config.json`:
+
+```json
+"ego_vehicle": {
+  "blueprint_filter": "vehicle.tesla.model3",
+  "autopilot_enabled": false,
+  "controller": {
+    "mode": "perception_closed_loop",
+    "target_speed_kmh": 25.0,
+    "lookahead_m": 6.0,
+    "max_steer": 0.7,
+    "steer_kp": 0.9,
+    "throttle_kp": 0.5,
+    "max_throttle": 0.6,
+    "brake_distance_m": 12.0,
+    "slow_distance_m": 22.0,
+    "slow_throttle": 0.2,
+    "stop_speed_threshold_mps": 0.3,
+    "emergency_brake": 1.0
+  }
+}
+```
+
+Because the controller is closed-loop on perception, the pipeline also logs the
+ego vehicle's **real** behavior, not only the symbolic decision:
+
+- frame-level columns: `ego_speed_mps`, `ego_throttle`, `ego_brake`, `ego_steer`,
+  `control_reason`, `actual_stop_ok`, `actual_stop_missed`, `actual_stop_false`
+- episode-level fields: `control_mode`, `real_correct_stop_rate`,
+  `real_missed_stop_rate`, `real_false_stop_rate`, `mean_ego_speed_mps`,
+  `min_ego_speed_mps`, `mean_throttle`, `mean_brake`, plus the existing
+  `collision_flag` and `min_obstacle_distance_m`.
+
+These real-behavior metrics are aggregated per condition, so final plots and
+tables differentiate camera-only vs. fusion (and clean vs. attacked) by what the
+car physically did under perception control, in addition to detection accuracy.
+
+To fall back to CARLA autopilot for debugging, set
+`ego_vehicle.controller.mode` to any value other than `perception_closed_loop`
+and `ego_vehicle.autopilot_enabled` to `true`.
+
+## Performance Tuning
+
+All compute- and I/O-heavy components expose knobs so that large episode sweeps
+stay tractable. Defaults are chosen for fast runs on a machine with an NVIDIA
+GPU.
+
+GPU / compute:
+
+- `detector.device`, `detector.require_cuda`: force YOLO onto a specific CUDA
+  device and fail fast if CUDA is missing.
+- `detector.imgsz`: inference resolution passed to Ultralytics (e.g. `640`).
+- `detector.half_precision`: run YOLO in FP16 on CUDA.
+- `fusion.segmentation_device`, `fusion.segmentation_half_precision`: GPU/FP16
+  selection for the DeepLabV3 segmentation backbone.
+- `fusion.segmentation_input_size`: long-side resize for segmentation input.
+  `512` is roughly 3-4x faster than full 1280x720 with negligible impact on
+  semantic point painting.
+
+Top-level I/O knobs in `configs\full_pipeline_config.json`:
+
+- `save_every_n`: save every Nth processed frame (RGB images and frame CSV row).
+- `save_every_n_lidar`: save raw LiDAR `.npy` every Nth frame (defaults to
+  `save_every_n`).
+- `save_every_n_lidar_bev`: save the LiDAR bird's-eye visualization every Nth
+  frame.
+- `save_lidar_clean_when_no_attack`: when LiDAR attacks are disabled for a run,
+  skip saving the redundant clean LiDAR copy (default `false`).
+- `image_format`: `"jpg"` (default) or `"png"`. JPEG is dramatically faster and
+  smaller with no loss of detection fidelity.
+- `jpeg_quality`, `png_compression_level`: codec speed/quality tradeoffs.
+- `representative_frame_cap`: upper bound on the number of annotated frames
+  tracked for representative-screenshot selection.
+
+Simulator-level knobs:
+
+- `post_map_switch_stabilize_seconds`: time to let CARLA settle after a map
+  reload. Set lower on very stable setups.
+- `npc_spawn_cap`: upper bound on NPC vehicles; lower values reduce per-tick
+  physics cost.
+- `group_episodes_by_town`: process all episodes of a town before switching
+  maps, minimizing the number of expensive map reloads.
 
 ## Reproducibility and Reliability Features
 

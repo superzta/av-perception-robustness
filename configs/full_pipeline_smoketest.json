@@ -5,6 +5,13 @@
   "episode_frames": 24,
   "warmup_frames": 6,
   "save_every_n": 1,
+  "save_every_n_lidar": 2,
+  "save_every_n_lidar_bev": 3,
+  "save_lidar_clean_when_no_attack": false,
+  "image_format": "jpg",
+  "jpeg_quality": 88,
+  "png_compression_level": 1,
+  "representative_frame_cap": 48,
   "heartbeat_interval_frames": 10,
   "towns": [
     "Town03",
@@ -40,7 +47,21 @@
   },
   "ego_vehicle": {
     "blueprint_filter": "vehicle.tesla.model3",
-    "autopilot_enabled": true
+    "autopilot_enabled": false,
+    "controller": {
+      "mode": "perception_closed_loop",
+      "target_speed_kmh": 20.0,
+      "lookahead_m": 6.0,
+      "max_steer": 0.7,
+      "steer_kp": 0.9,
+      "throttle_kp": 0.5,
+      "max_throttle": 0.55,
+      "brake_distance_m": 10.0,
+      "slow_distance_m": 18.0,
+      "slow_throttle": 0.2,
+      "stop_speed_threshold_mps": 0.3,
+      "emergency_brake": 1.0
+    }
   },
   "sensors": {
     "camera": {
@@ -79,7 +100,11 @@
   "detector": {
     "backend": "ultralytics",
     "model": "models/weights/yolo/yolov8n.pt",
+    "device": "cuda:0",
+    "require_cuda": true,
     "confidence_threshold": 0.25,
+    "imgsz": 640,
+    "half_precision": true,
     "require_yolo": true,
     "target_classes": [
       "car",
@@ -93,11 +118,19 @@
     ]
   },
   "fusion": {
-    "mode": "late_fusion_rgb_with_lidar_confirmation",
+    "mode": "pointpainting_semantic_fusion",
+    "require_pointpainting": true,
+    "segmentation_model": "deeplabv3_resnet50",
+    "segmentation_device": "cuda:0",
+    "segmentation_input_size": 512,
+    "segmentation_half_precision": true,
     "min_lidar_points_in_bbox": 8,
     "min_depth_m": 0.5,
     "max_depth_m": 60.0,
-    "unconfirmed_confidence_penalty": 0.6
+    "unconfirmed_confidence_penalty": 0.6,
+    "semantic_match_min_ratio": 0.15,
+    "semantic_match_min_score": 0.3,
+    "semantic_bonus_confidence": 0.08
   },
   "decision": {
     "fusion_obstacle_point_threshold": 45,

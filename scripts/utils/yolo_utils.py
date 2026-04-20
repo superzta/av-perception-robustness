@@ -20,6 +20,8 @@ class YoloDetector:
         self.require_yolo = bool(detector_cfg.get("require_yolo", True))
         self.device = str(detector_cfg.get("device", "auto")).lower()
         self.require_cuda = bool(detector_cfg.get("require_cuda", False))
+        self.imgsz = int(detector_cfg.get("imgsz", 640))
+        self.half_precision = bool(detector_cfg.get("half_precision", False))
         self._model = None
         self._predict_device = None
 
@@ -40,7 +42,24 @@ class YoloDetector:
                 "Install CUDA-enabled PyTorch and verify torch.cuda.is_available()."
             )
         self.logger.info("Loaded YOLO model: %s", str(model_source))
-        self.logger.info("YOLO inference device: %s", self._predict_device if self._predict_device else "auto")
+        self.logger.info(
+            "YOLO inference device=%s imgsz=%d half=%s",
+            self._predict_device if self._predict_device else "auto",
+            self.imgsz,
+            self.half_precision,
+        )
+        self._use_half = bool(
+            self.half_precision
+            and self._predict_device is not None
+            and str(self._predict_device).startswith("cuda")
+        )
+        try:
+            import torch
+
+            if self._use_half:
+                torch.backends.cudnn.benchmark = True
+        except Exception:  # noqa: BLE001
+            pass
 
     @property
     def enabled(self) -> bool:
@@ -82,6 +101,8 @@ class YoloDetector:
             conf=self.confidence_threshold,
             verbose=False,
             device=self._predict_device,
+            imgsz=self.imgsz,
+            half=self._use_half,
         )
         if not results:
             return []
@@ -114,17 +135,45 @@ class YoloDetector:
         return detections
 
 
-def save_bgr_image(image_bgr: np.ndarray, output_path: Path) -> None:
+def save_bgr_image(
+    image_bgr: np.ndarray,
+    output_path: Path,
+    jpeg_quality: int = 90,
+    png_compression: int = 1,
+) -> None:
+    """Save an image; format is inferred from the output path extension.
+
+    ``jpeg_quality`` controls JPEG quality (0-100). ``png_compression`` controls
+    PNG compression level (0-9). Lower PNG levels are much faster with barely
+    larger files.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = output_path.suffix.lower()
     try:
         import cv2
 
-        cv2.imwrite(str(output_path), image_bgr)
+        if suffix in (".jpg", ".jpeg"):
+            cv2.imwrite(
+                str(output_path),
+                image_bgr,
+                [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)],
+            )
+        elif suffix == ".png":
+            cv2.imwrite(
+                str(output_path),
+                image_bgr,
+                [int(cv2.IMWRITE_PNG_COMPRESSION), int(png_compression)],
+            )
+        else:
+            cv2.imwrite(str(output_path), image_bgr)
     except ImportError:
         from PIL import Image
 
         image_rgb = image_bgr[:, :, ::-1]
-        Image.fromarray(image_rgb).save(output_path)
+        if suffix in (".jpg", ".jpeg"):
+            Image.fromarray(image_rgb).save(output_path, quality=int(jpeg_quality))
+        else:
+            Image.fromarray(image_rgb).save(output_path)
 
 
 def draw_detections(image_bgr: np.ndarray, detections: List[dict]) -> np.ndarray:

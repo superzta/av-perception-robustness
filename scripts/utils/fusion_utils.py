@@ -207,6 +207,12 @@ class SemanticPointPainter:
         self.require_pointpainting = bool(fusion_cfg.get("require_pointpainting", False))
         self.device = str(fusion_cfg.get("segmentation_device", "auto")).lower()
         self.model_name = str(fusion_cfg.get("segmentation_model", "deeplabv3_resnet50"))
+        seg_input_size = fusion_cfg.get("segmentation_input_size", 0)
+        try:
+            self.seg_input_size = int(seg_input_size) if seg_input_size else 0
+        except (TypeError, ValueError):
+            self.seg_input_size = 0
+        self.half_precision = bool(fusion_cfg.get("segmentation_half_precision", False))
         self._model = None
         self._torch = None
         if self.enabled:
@@ -257,10 +263,23 @@ class SemanticPointPainter:
         self._model = deeplabv3_resnet50(weights=weights).to(self._device_obj)
         self._model.eval()
         self._torch = torch
+
+        self._use_half = bool(self.half_precision and self._device_obj.type == "cuda")
+        if self._use_half:
+            self._model = self._model.half()
+
+        if self._device_obj.type == "cuda":
+            try:
+                torch.backends.cudnn.benchmark = True
+            except Exception:  # noqa: BLE001
+                pass
+
         self.logger.info(
-            "Loaded PointPainting segmentation backend=%s device=%s torch=%s torch_cuda=%s cuda_available=%s",
+            "Loaded PointPainting backend=%s device=%s input_size=%s half=%s torch=%s cuda=%s avail=%s",
             self.model_name,
             self._device_obj,
+            self.seg_input_size or "full",
+            self._use_half,
             torch.__version__,
             torch.version.cuda,
             cuda_available,
@@ -277,27 +296,43 @@ class SemanticPointPainter:
 
         torch = self._torch
         image_rgb = image_bgr[:, :, ::-1]
-        pil = None
         try:
             from PIL import Image
-
-            pil = Image.fromarray(image_rgb)
         except Exception as exc:  # noqa: BLE001
             if self.require_pointpainting:
                 raise RuntimeError("PointPainting requires Pillow for RGB preprocessing.") from exc
             n = projected_uv.shape[0]
             return np.zeros((n,), dtype=np.int32), np.zeros((n,), dtype=np.float32)
 
+        img_h, img_w = image_bgr.shape[:2]
+        scale_u = 1.0
+        scale_v = 1.0
+        pil = Image.fromarray(image_rgb)
+        if self.seg_input_size and self.seg_input_size > 0:
+            long_side = max(img_h, img_w)
+            if long_side > self.seg_input_size:
+                ratio = float(self.seg_input_size) / float(long_side)
+                new_w = max(1, int(round(img_w * ratio)))
+                new_h = max(1, int(round(img_h * ratio)))
+                pil = pil.resize((new_w, new_h), Image.BILINEAR)
+                scale_u = float(new_w) / float(img_w)
+                scale_v = float(new_h) / float(img_h)
+
         xyt = self._preprocess(pil).unsqueeze(0).to(self._device_obj)
-        with torch.no_grad():
-            logits = self._model(xyt)["out"][0]  # [C,H,W]
-            probs = torch.softmax(logits, dim=0)
-            sem_ids = torch.argmax(probs, dim=0).cpu().numpy().astype(np.int32)
-            sem_scores = torch.max(probs, dim=0).values.cpu().numpy().astype(np.float32)
+        if getattr(self, "_use_half", False):
+            xyt = xyt.half()
+
+        with torch.inference_mode():
+            logits = self._model(xyt)["out"][0]
+            sem_ids_t = torch.argmax(logits, dim=0)
+            probs = torch.softmax(logits.float(), dim=0)
+            sem_scores_t = torch.max(probs, dim=0).values
+            sem_ids = sem_ids_t.to(torch.int32).cpu().numpy()
+            sem_scores = sem_scores_t.cpu().numpy().astype(np.float32)
 
         h, w = sem_ids.shape
-        u = np.round(projected_uv[:, 0]).astype(np.int32)
-        v = np.round(projected_uv[:, 1]).astype(np.int32)
+        u = np.round(projected_uv[:, 0] * scale_u).astype(np.int32)
+        v = np.round(projected_uv[:, 1] * scale_v).astype(np.int32)
         valid = (u >= 0) & (u < w) & (v >= 0) & (v < h)
         out_ids = np.zeros((projected_uv.shape[0],), dtype=np.int32)
         out_scores = np.zeros((projected_uv.shape[0],), dtype=np.float32)
